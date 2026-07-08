@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package wemeet;
+
+// ── 登录/注册消息 ───────────────────────────────────────
+
+message LoginReq {
+    string email    = 1;
+    string password = 2;
+}
+
+message LoginResp {
+    bool   success    = 1;
+    uint64 user_id    = 2;
+    string token      = 3;   // 会话令牌
+    string nickname   = 4;
+    string avatar_url = 5;
+    string error_msg  = 6;
+}
+
+message RegisterReq {
+    string email    = 1;
+    string password = 2;
+    string nickname = 3;
+}
+
+message RegisterResp {
+    bool   success   = 1;
+    uint64 user_id   = 2;
+    string error_msg = 3;
+}
+
+message LogoutReq {
+    uint64 user_id = 1;
+    string token   = 2;
+}

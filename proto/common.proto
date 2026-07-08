@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package wemeet;
+
+// ── 通用消息包装 ────────────────────────────────────────
+// 每个 TCP 包 = 4 字节大端长度 + BaseMessage 序列化数据
+
+enum MsgType {
+    MSG_UNKNOWN          = 0;
+    // 认证
+    MSG_LOGIN_REQ        = 100;
+    MSG_LOGIN_RESP       = 101;
+    MSG_REGISTER_REQ     = 102;
+    MSG_REGISTER_RESP    = 103;
+    MSG_LOGOUT_REQ       = 104;
+    // 心跳
+    MSG_HEARTBEAT_REQ    = 200;
+    MSG_HEARTBEAT_RESP   = 201;
+    // 好友
+    MSG_FRIEND_LIST_REQ  = 300;
+    MSG_FRIEND_LIST_RESP = 301;
+    MSG_FRIEND_ADD_REQ   = 302;
+    MSG_FRIEND_ADD_RESP  = 303;
+    MSG_FRIEND_STATUS    = 304;   // 好友上线/下线推送
+    // 会议
+    MSG_MEETING_CREATE_REQ  = 400;
+    MSG_MEETING_CREATE_RESP = 401;
+    MSG_MEETING_JOIN_REQ    = 402;
+    MSG_MEETING_JOIN_RESP   = 403;
+    MSG_MEETING_LEAVE       = 404;
+    MSG_MEETING_END         = 405;
+    MSG_MEETING_PARTICIPANT = 406;  // 参与者变更通知
+    // 信令（SDP/ICE）
+    MSG_SDP_OFFER       = 500;
+    MSG_SDP_ANSWER      = 501;
+    MSG_ICE_CANDIDATE   = 502;
+    // 聊天
+    MSG_CHAT_SEND       = 600;
+    MSG_CHAT_RECEIVE    = 601;
+    // 错误
+    MSG_ERROR           = 999;
+}
+
+message BaseMessage {
+    MsgType type           = 1;
+    uint64  sequence_id    = 2;   // 请求序列号，用于请求-响应匹配
+    uint64  timestamp_ms   = 3;
+    bytes   payload        = 4;   // 子消息序列化数据
+}
+
+// ── 通用结构 ────────────────────────────────────────────
+message ErrorResponse {
+    int32  code    = 1;
+    string message = 2;
+}
+
+message HeartBeatReq {
+    uint64 user_id = 1;
+}
+
+message HeartBeatResp {
+    int64 server_time_ms = 1;
+}

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package wemeet;
+
+// ── 信令消息（WebRTC SDP / ICE）──────────────────────────
+
+message SDPOffer {
+    uint64 from_user_id = 1;
+    uint64 to_user_id   = 2;
+    string room_id      = 3;
+    string sdp          = 4;   // SDP 描述文本
+    string type         = 5;   // "offer" / "answer"
+}
+
+message SDPAnswer {
+    uint64 from_user_id = 1;
+    uint64 to_user_id   = 2;
+    string room_id      = 3;
+    string sdp          = 4;
+}
+
+message ICECandidate {
+    uint64 from_user_id     = 1;
+    uint64 to_user_id       = 2;
+    string room_id          = 3;
+    string candidate        = 4;   // ICE candidate 字符串
+    string sdp_mid          = 5;
+    int32  sdp_mline_index  = 6;
+}
+
+// ── 聊天消息 ────────────────────────────────────────────
+message ChatSend {
+    uint64 user_id   = 1;
+    string room_id   = 2;
+    string content   = 3;
+}
+
+message ChatReceive {
+    uint64 user_id    = 1;
+    string nickname   = 2;
+    string room_id    = 3;
+    string content    = 4;
+    int64  timestamp  = 5;
+}
+
+// ── 好友消息 ────────────────────────────────────────────
+message FriendListReq {
+    uint64 user_id = 1;
+}
+
+message FriendInfo {
+    uint64 user_id    = 1;
+    string nickname   = 2;
+    string avatar_url = 3;
+    bool   is_online  = 4;
+}
+
+message FriendListResp {
+    bool   success         = 1;
+    repeated FriendInfo friends = 2;
+}
+
+message FriendAddReq {
+    uint64 from_user_id = 1;
+    uint64 to_user_id   = 2;
+}
+
+message FriendAddResp {
+    bool   success   = 1;
+    string error_msg = 2;
+}
+
+message FriendStatusNotify {
+    uint64 user_id   = 1;
+    bool   is_online  = 2;
+}

@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package wemeet;
+
+// ── 会议控制消息 ────────────────────────────────────────
+
+message CreateMeetingReq {
+    uint64 creator_id = 1;
+    string title      = 2;
+    int32  max_participants = 3;   // 默认 50
+}
+
+message CreateMeetingResp {
+    bool   success      = 1;
+    string room_id      = 2;       // 会议室唯一 ID
+    string error_msg    = 3;
+}
+
+message JoinMeetingReq {
+    uint64 user_id   = 1;
+    string room_id   = 2;
+    string nickname  = 3;
+}
+
+message JoinMeetingResp {
+    bool   success            = 1;
+    string error_msg          = 2;
+    repeated Participant participants = 3;   // 现有参与者列表
+}
+
+message Participant {
+    uint64 user_id   = 1;
+    string nickname  = 2;
+    bool   audio_on  = 3;
+    bool   video_on  = 4;
+    bool   is_host   = 5;
+}
+
+message LeaveMeeting {
+    uint64 user_id = 1;
+    string room_id = 2;
+}
+
+message MeetingEnd {
+    string room_id = 1;
+    string reason  = 2;  // "host_ended" / "timeout"
+}
+
+message ParticipantUpdate {
+    string room_id = 1;
+    enum Action {
+        JOINED  = 0;
+        LEFT    = 1;
+        UPDATED = 2;  // 音视频状态变更
+    }
+    Action      action      = 2;
+    Participant participant = 3;
+}
