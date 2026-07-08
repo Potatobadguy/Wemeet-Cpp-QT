@@ -7,7 +7,8 @@ LoginDialog::LoginDialog(QWidget* parent)
     : QDialog(parent) {
 
     setWindowTitle("WeMeet — 登录");
-    setFixedSize(420, 520);
+    setFixedWidth(420);                        // 宽度固定，高度由内容决定
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);  // 大小完全由内容决定
     setStyleSheet("QDialog { background: #1a1a2e; }");
 
     auto* main_layout = new QVBoxLayout(this);

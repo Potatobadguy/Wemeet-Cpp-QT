@@ -80,6 +80,15 @@ wemeet/
 ├── scripts/
 │   ├── init_db.sql             # 数据库建表
 │   └── start_server.sh         # 一键编译启动
+├── docs/                       # 📖 学习文档（按模块拆分）
+│   ├── 00-学习路线总览.md
+│   ├── 01-通用工具库.md
+│   ├── 02-协议层与编解码.md
+│   ├── 03-网络框架.md
+│   ├── 04-数据库层.md
+│   ├── 05-信令服务器.md
+│   ├── 06-Qt客户端.md
+│   └── 07-单元测试.md
 └── README.md
 ```
 
@@ -201,6 +210,23 @@ EventLoopPool started: 16 worker threads
 - **Win11 + WSL2**：WSLg 原生支持 GUI，客户端窗口会直接在 Windows 桌面上显示，无需额外配置
 - **原生 Linux**：直接运行即可
 - **旧版 Win10 WSL1/2**：需要安装 X Server（如 [VcXsrv](https://sourceforge.net/projects/vcxsrv/)），并设置 `export DISPLAY=:0`
+
+## 📖 学习文档
+
+详细的模块学习指南见 [`docs/`](./docs/) 目录：
+
+| 文档 | 内容 |
+|------|------|
+| [00-学习路线总览](./docs/00-学习路线总览.md) | 分层架构、技术点速查、10天学习计划 |
+| [01-通用工具库](./docs/01-通用工具库.md) | Buffer移动语义、内存池TLS、无锁队列、线程池、双缓冲日志 |
+| [02-协议层与编解码](./docs/02-协议层与编解码.md) | Protobuf协议设计、BaseMessage包装模式、粘包拆包解决方案 |
+| [03-网络框架](./docs/03-网络框架.md) | epoll ET、Reactor模型、One Loop Per Thread、分片锁连接表 |
+| [04-数据库层](./docs/04-数据库层.md) | RAII连接池、Prepared Statement、SQL注入防御、事务 |
+| [05-信令服务器](./docs/05-信令服务器.md) | 消息分发、SHA256认证、Token机制、WebRTC信令转发 |
+| [06-Qt客户端](./docs/06-Qt客户端.md) | 信号槽、QSS暗色主题、QTcpSocket异步通信 |
+| [07-单元测试](./docs/07-单元测试.md) | 测试框架、29个测试用例、从测试倒推源码的学习方法 |
+
+每个文档都包含：**为什么用这个技术**、**适用场景**、**代码逐行解析**、**学习检查点**。
 
 ## 测试结果
 
