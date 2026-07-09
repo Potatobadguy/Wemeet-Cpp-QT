@@ -9,8 +9,8 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , network_(new NetworkClient(this)) {
 
+    setup_navigation();   // 先创建 nav_bar_，setup_ui 中会用到
     setup_ui();
-    setup_navigation();
 
     // 默认显示登录页
     stack_->setCurrentIndex(PAGE_LOGIN);
@@ -19,12 +19,30 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setup_ui() {
+    // ── 中央容器：导航栏(上) + 页面堆叠器(下) ────────────────
+    QWidget* central = new QWidget(this);
+    auto* root_layout = new QVBoxLayout(central);
+    root_layout->setContentsMargins(0, 0, 0, 0);
+    root_layout->setSpacing(0);
+
+    root_layout->addWidget(nav_bar_, 0);      // 导航栏：固定高度 48px
     stack_ = new QStackedWidget(this);
-    setCentralWidget(stack_);
+    root_layout->addWidget(stack_, 1);         // 页面区：占满剩余空间
+
+    setCentralWidget(central);
 
     // ── 登录页 ───────────────────────────────────────────
     login_page_ = new LoginDialog(this);
-    stack_->addWidget(login_page_);
+
+    // 用包装器居中显示登录页，避免 QStackedWidget 拉伸或左上对齐
+    auto* login_wrapper = new QWidget(this);
+    auto* wrapper_layout = new QVBoxLayout(login_wrapper);
+    wrapper_layout->setContentsMargins(0, 0, 0, 0);
+    wrapper_layout->addStretch();
+    wrapper_layout->addWidget(login_page_, 0, Qt::AlignCenter);
+    wrapper_layout->addStretch();
+
+    stack_->addWidget(login_wrapper);
 
     connect(login_page_, &LoginDialog::login_success,
             this, &MainWindow::on_login_success);
