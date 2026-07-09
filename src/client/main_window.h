@@ -37,10 +37,10 @@ private:
     void setup_navigation();
 
     // ── 页面 ─────────────────────────────────────────────
-    enum Page { PAGE_LOGIN = 0, PAGE_LOBBY = 1, PAGE_MEETING = 2 };
+    enum Page { PAGE_LOBBY = 0, PAGE_MEETING = 1 };
+
 
     QStackedWidget* stack_;
-    LoginDialog*    login_page_;
     QWidget*        lobby_page_;
     MeetingRoom*    meeting_page_;
 

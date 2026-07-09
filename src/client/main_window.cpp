@@ -1,9 +1,9 @@
 #include "main_window.h"
-#include "login_dialog.h"
 #include "meeting_room.h"
 #include "network_client.h"
 #include <QMessageBox>
 #include <QInputDialog>
+
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -12,8 +12,8 @@ MainWindow::MainWindow(QWidget* parent)
     setup_navigation();   // 先创建 nav_bar_，setup_ui 中会用到
     setup_ui();
 
-    // 默认显示登录页
-    stack_->setCurrentIndex(PAGE_LOGIN);
+    // 默认显示大厅页
+    stack_->setCurrentIndex(PAGE_LOBBY);
 }
 
 MainWindow::~MainWindow() = default;
@@ -30,22 +30,6 @@ void MainWindow::setup_ui() {
     root_layout->addWidget(stack_, 1);         // 页面区：占满剩余空间
 
     setCentralWidget(central);
-
-    // ── 登录页 ───────────────────────────────────────────
-    login_page_ = new LoginDialog(this);
-
-    // 用包装器居中显示登录页，避免 QStackedWidget 拉伸或左上对齐
-    auto* login_wrapper = new QWidget(this);
-    auto* wrapper_layout = new QVBoxLayout(login_wrapper);
-    wrapper_layout->setContentsMargins(0, 0, 0, 0);
-    wrapper_layout->addStretch();
-    wrapper_layout->addWidget(login_page_, 0, Qt::AlignCenter);
-    wrapper_layout->addStretch();
-
-    stack_->addWidget(login_wrapper);
-
-    connect(login_page_, &LoginDialog::login_success,
-            this, &MainWindow::on_login_success);
 
     // ── 大厅页 ───────────────────────────────────────────
     lobby_page_ = new QWidget(this);
@@ -92,7 +76,7 @@ void MainWindow::setup_navigation() {
     auto* nav_layout = new QHBoxLayout(nav_bar_);
 
     user_label_ = new QLabel("WeMeet");
-    user_label_->setStyleSheet("color: white; font-size: 16px; font-weight: bold;");
+    user_label_->setStyleSheet("color: #333333; font-size: 16px; font-weight: bold; background: transparent;");
 
     logout_btn_ = new QPushButton("退出");
     logout_btn_->setStyleSheet(
@@ -104,7 +88,7 @@ void MainWindow::setup_navigation() {
     nav_layout->addStretch();
     nav_layout->addWidget(logout_btn_);
 
-    nav_bar_->setStyleSheet("background: #1E1E2E; padding: 8px;");
+    nav_bar_->setStyleSheet("background: #ffffff; padding: 8px; border-bottom: 1px solid #e8edf5;");
     nav_bar_->setFixedHeight(48);
     nav_bar_->hide();
 
@@ -133,5 +117,5 @@ void MainWindow::on_join_meeting(const QString& room_id) {
 void MainWindow::on_logout() {
     current_user_id_ = 0;
     nav_bar_->hide();
-    stack_->setCurrentIndex(PAGE_LOGIN);
+    stack_->setCurrentIndex(PAGE_LOBBY);
 }

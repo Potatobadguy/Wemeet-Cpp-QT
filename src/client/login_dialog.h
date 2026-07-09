@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QTabWidget>
+#include <QMouseEvent>
 
 /**
  * @brief 登录/注册对话框 — 信号槽发送 login_success 信号
@@ -17,9 +18,16 @@ public:
 signals:
     void login_success(uint64_t user_id, const QString& nickname);
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+
 private slots:
     void on_login_clicked();
     void on_register_clicked();
+    void on_close_clicked();
 
 private:
     void setup_login_tab(QWidget* tab);
@@ -32,4 +40,8 @@ private:
     QLineEdit* reg_pass_;
     QLineEdit* reg_nickname_;
     QLineEdit* reg_confirm_pass_;
+
+    QWidget* title_bar_ = nullptr;
+    QPoint drag_pos_;
+    bool   dragging_ = false;
 };
