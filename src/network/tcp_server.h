@@ -45,6 +45,12 @@ public:
     // 向所有连接广播消息
     void broadcast(const void* data, size_t len);
 
+    // 向指定 conn_id 的连接发送
+    void send_to_conn(uint64_t conn_id, const void* data, size_t len);
+
+    // 查找指定 conn_id 的连接
+    std::shared_ptr<TcpConnection> get_connection(uint64_t conn_id);
+
 private:
     void handle_accept();
 

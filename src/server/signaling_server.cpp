@@ -5,6 +5,7 @@
 #include "auth.pb.h"
 #include "meeting.pb.h"
 #include "signaling.pb.h"
+#include "media.pb.h"
 #include <cstring>
 
 namespace wemeet {
@@ -29,6 +30,9 @@ SignalingServer::SignalingServer(const Config& config)
     auth_service_    = std::make_unique<AuthService>(db_pool_.get(), user_manager_.get());
     meeting_service_ = std::make_unique<MeetingService>(db_pool_.get());
 
+    // 媒体中继
+    media_relay_ = std::make_unique<MediaRelay>(config.relay_ip, config.relay_base_port);
+
     // TCP 服务器
     tcp_server_ = std::make_unique<TcpServer>(
         main_loop_.get(), loop_pool_.get(), config.listen_ip, config.listen_port);
@@ -38,8 +42,29 @@ SignalingServer::SignalingServer(const Config& config)
             on_message(conn, buf);
         });
 
-    LOG_INFO("SignalingServer initialized on %s:%u",
-             config.listen_ip.c_str(), config.listen_port);
+    tcp_server_->set_connection_callback(
+        [this](const std::shared_ptr<TcpConnection>& conn) {
+            if (conn->connected()) {
+                // 新连接建立
+                LOG_INFO("Client connected: conn_id=%lu, fd=%d",
+                         conn->conn_id(), conn->socket().fd());
+            } else {
+                // 连接关闭时清理 user→conn 映射
+                if (auto* uid = conn->get_context<uint64_t>()) {
+                    std::lock_guard<std::mutex> lock(user_conn_mutex_);
+                    user_conn_map_.erase(*uid);
+                    LOG_INFO("User %lu disconnected, conn_id=%lu, cleaned up mapping",
+                             *uid, conn->conn_id());
+                } else {
+                    LOG_INFO("Client disconnected: conn_id=%lu (unauthenticated)",
+                             conn->conn_id());
+                }
+            }
+        });
+
+    LOG_INFO("SignalingServer initialized on %s:%u, relay on %s:%u+",
+             config.listen_ip.c_str(), config.listen_port,
+             config.relay_ip.c_str(), config.relay_base_port);
 }
 
 SignalingServer::~SignalingServer() {
@@ -48,13 +73,14 @@ SignalingServer::~SignalingServer() {
 
 void SignalingServer::start() {
     loop_pool_->start();
-
-    // 主循环处理 accept
+    // 启动媒体中继
+    media_relay_->start(config_.relay_threads);
     LOG_INFO("SignalingServer starting...");
     main_loop_->loop();
 }
 
 void SignalingServer::stop() {
+    media_relay_->stop();
     loop_pool_->stop();
     main_loop_->quit();
     if (tcp_server_) tcp_server_->stop();
@@ -67,15 +93,25 @@ void SignalingServer::on_message(
 
     BaseMessage base;
     if (!Codec::decode_base_message(buf, base)) {
-        LOG_WARN("Failed to decode BaseMessage from conn=%lu", conn->conn_id());
+        LOG_WARN("Failed to decode BaseMessage from conn=%lu (buf_size=%zu)",
+                 conn->conn_id(), buf.readable_size());
         return;
     }
 
     uint64_t seq_id = base.sequence_id();
+    uint64_t from_user = 0;
+    if (auto* uid = conn->get_context<uint64_t>()) from_user = *uid;
+
+    LOG_INFO("RECV conn=%lu user=%llu type=%d seq=%llu payload=%zuB",
+             conn->conn_id(), from_user, static_cast<int>(base.type()),
+             seq_id, base.payload().size());
 
     switch (base.type()) {
     case MsgType::MSG_LOGIN_REQ:
         handle_login(conn, seq_id, buf);
+        break;
+    case MsgType::MSG_AUTH_BY_ID_REQ:
+        handle_auth_by_id(conn, seq_id, buf);
         break;
     case MsgType::MSG_REGISTER_REQ:
         handle_register(conn, seq_id, buf);
@@ -104,17 +140,61 @@ void SignalingServer::on_message(
     case MsgType::MSG_CHAT_SEND:
         handle_chat(conn, seq_id, buf);
         break;
+    // ── 新增加配媒体消息 ──────────────────────────────
+    case MsgType::MSG_MEDIA_RELAY_REGISTER:
+        handle_media_relay_register(conn, seq_id, buf);
+        break;
+    case MsgType::MSG_MEDIA_STATS_REPORT:
+        handle_media_stats_report(conn, seq_id, buf);
+        break;
+    case MsgType::MSG_MEDIA_CONTROL:
+        handle_media_control(conn, seq_id, buf);
+        break;
+    case MsgType::MSG_SCREEN_SHARE_REQ:
+        handle_screen_share_req(conn, seq_id, buf);
+        break;
+    case MsgType::MSG_PARTICIPANT_ROLE:
+        handle_participant_role(conn, seq_id, buf);
+        break;
     default:
         LOG_WARN("Unknown message type: %d", static_cast<int>(base.type()));
         break;
     }
 }
 
-// ── 登录处理 ─────────────────────────────────────────────
-void SignalingServer::handle_login(
+// ── 已有处理器（简化，保持原有逻辑）────────────────────
+
+void SignalingServer::handle_auth_by_id(
         const std::shared_ptr<TcpConnection>& conn,
         uint64_t seq_id, Buffer& buf) {
 
+    BaseMessage base;
+    AuthByIdReq req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    // 直接注册到 user_conn_map_
+    conn->set_context(std::make_any<uint64_t>(req.user_id()));
+    {
+        std::lock_guard<std::mutex> lock(user_conn_mutex_);
+        user_conn_map_[req.user_id()] = conn->conn_id();
+    }
+
+    AuthByIdResp resp;
+    resp.set_success(true);
+    resp.set_user_id(req.user_id());
+
+    auto resp_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_AUTH_BY_ID_RESP), seq_id, resp);
+    conn->send(std::move(resp_buf));
+
+    LOG_INFO("Auth by ID: user=%lu (%s) registered, conn_id=%lu",
+             req.user_id(), req.nickname().c_str(), conn->conn_id());
+}
+
+void SignalingServer::handle_login(
+        const std::shared_ptr<TcpConnection>& conn,
+        uint64_t seq_id, Buffer& buf) {
     BaseMessage base;
     LoginReq    req;
     Codec::decode_base_message(buf, base);
@@ -133,13 +213,20 @@ void SignalingServer::handle_login(
     auto resp_buf = Codec::encode_wrapped(
         static_cast<int>(MsgType::MSG_LOGIN_RESP), seq_id, resp);
     conn->send(std::move(resp_buf));
+
+    // 记录 user_id → conn 映射
+    if (result.success) {
+        conn->set_context(std::make_any<uint64_t>(result.user_id));
+        {
+            std::lock_guard<std::mutex> lock(user_conn_mutex_);
+            user_conn_map_[result.user_id] = conn->conn_id();
+        }
+    }
 }
 
-// ── 注册处理 ─────────────────────────────────────────────
 void SignalingServer::handle_register(
         const std::shared_ptr<TcpConnection>& conn,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage  base;
     RegisterReq  req;
     Codec::decode_base_message(buf, base);
@@ -157,11 +244,9 @@ void SignalingServer::handle_register(
     conn->send(std::move(resp_buf));
 }
 
-// ── 心跳处理 ─────────────────────────────────────────────
 void SignalingServer::handle_heartbeat(
         const std::shared_ptr<TcpConnection>& conn,
         uint64_t seq_id, Buffer& /*buf*/) {
-
     HeartBeatResp resp;
     resp.set_server_time_ms(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -172,11 +257,9 @@ void SignalingServer::handle_heartbeat(
     conn->send(std::move(resp_buf));
 }
 
-// ── 创建会议 ─────────────────────────────────────────────
 void SignalingServer::handle_create_meeting(
         const std::shared_ptr<TcpConnection>& conn,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage     base;
     CreateMeetingReq req;
     Codec::decode_base_message(buf, base);
@@ -195,11 +278,9 @@ void SignalingServer::handle_create_meeting(
     conn->send(std::move(resp_buf));
 }
 
-// ── 加入会议 ─────────────────────────────────────────────
 void SignalingServer::handle_join_meeting(
         const std::shared_ptr<TcpConnection>& conn,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage    base;
     JoinMeetingReq req;
     Codec::decode_base_message(buf, base);
@@ -224,87 +305,100 @@ void SignalingServer::handle_join_meeting(
         static_cast<int>(MsgType::MSG_MEETING_JOIN_RESP), seq_id, resp);
     conn->send(std::move(resp_buf));
 
+    LOG_INFO("User %lu (%s) joined room %s, total=%zu participants",
+             req.user_id(), req.nickname().c_str(), req.room_id().c_str(),
+             result.participants.size());
+
     // 通知其他参与者
     if (result.success) {
         ParticipantUpdate update;
         update.set_room_id(req.room_id());
         update.set_action(ParticipantUpdate::JOINED);
-        // 广播...
+        auto* p = update.mutable_participant();
+        p->set_user_id(req.user_id());
+        p->set_nickname(req.nickname());
+        p->set_audio_on(true);
+        p->set_video_on(true);
+        p->set_is_host(false);
+
+        auto bcast_buf = Codec::encode_wrapped(
+            static_cast<int>(MsgType::MSG_MEETING_PARTICIPANT), seq_id, update);
+        broadcast_to_room(req.room_id(), req.user_id(), std::move(bcast_buf));
     }
 }
 
-// ── 离开会议 ─────────────────────────────────────────────
 void SignalingServer::handle_leave_meeting(
-        const std::shared_ptr<TcpConnection>& conn,
+        const std::shared_ptr<TcpConnection>& /*conn*/,
         uint64_t /*seq_id*/, Buffer& buf) {
-
     BaseMessage  base;
     LeaveMeeting req;
     Codec::decode_base_message(buf, base);
     Codec::decode_payload(base, req);
 
     meeting_service_->leave_meeting(req.user_id(), req.room_id());
+    media_relay_->unregister_participant(req.user_id(), req.room_id());
+
+    // 通知其他参与者
+    ParticipantUpdate update;
+    update.set_room_id(req.room_id());
+    update.set_action(ParticipantUpdate::LEFT);
+    auto* p = update.mutable_participant();
+    p->set_user_id(req.user_id());
+
+    auto bcast_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_MEETING_PARTICIPANT), 0, update);
+    broadcast_to_room(req.room_id(), req.user_id(), std::move(bcast_buf));
+
+    LOG_INFO("User %lu left room %s", req.user_id(), req.room_id().c_str());
 }
 
-// ── SDP 转发 ─────────────────────────────────────────────
 void SignalingServer::handle_sdp_offer(
         const std::shared_ptr<TcpConnection>& /*conn*/,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage base;
     SDPOffer    req;
     Codec::decode_base_message(buf, base);
     Codec::decode_payload(base, req);
 
-    // 转发 SDP Offer 给目标用户
-    SDPOffer fwd;
-    fwd.set_from_user_id(req.from_user_id());
-    fwd.set_to_user_id(req.to_user_id());
-    fwd.set_room_id(req.room_id());
-    fwd.set_sdp(req.sdp());
-    fwd.set_type("offer");
-
     auto fwd_buf = Codec::encode_wrapped(
-        static_cast<int>(MsgType::MSG_SDP_OFFER), seq_id, fwd);
-    // tcp_server_ 需要能根据 user_id 找到连接来发送
-    LOG_DEBUG("SDP Offer: from=%lu to=%lu", req.from_user_id(), req.to_user_id());
+        static_cast<int>(MsgType::MSG_SDP_OFFER), seq_id, req);
+    send_to_user(req.to_user_id(), fwd_buf.data(), fwd_buf.readable_size());
 }
 
 void SignalingServer::handle_sdp_answer(
         const std::shared_ptr<TcpConnection>& /*conn*/,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage base;
     SDPAnswer   req;
     Codec::decode_base_message(buf, base);
     Codec::decode_payload(base, req);
 
-    LOG_DEBUG("SDP Answer: from=%lu to=%lu", req.from_user_id(), req.to_user_id());
+    auto fwd_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_SDP_ANSWER), seq_id, req);
+    send_to_user(req.to_user_id(), fwd_buf.data(), fwd_buf.readable_size());
 }
 
 void SignalingServer::handle_ice_candidate(
         const std::shared_ptr<TcpConnection>& /*conn*/,
-        uint64_t /*seq_id*/, Buffer& buf) {
-
+        uint64_t seq_id, Buffer& buf) {
     BaseMessage  base;
     ICECandidate req;
     Codec::decode_base_message(buf, base);
     Codec::decode_payload(base, req);
 
-    LOG_DEBUG("ICE Candidate: from=%lu to=%lu", req.from_user_id(), req.to_user_id());
+    auto fwd_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_ICE_CANDIDATE), seq_id, req);
+    send_to_user(req.to_user_id(), fwd_buf.data(), fwd_buf.readable_size());
 }
 
-// ── 聊天 ─────────────────────────────────────────────────
 void SignalingServer::handle_chat(
         const std::shared_ptr<TcpConnection>& /*conn*/,
         uint64_t seq_id, Buffer& buf) {
-
     BaseMessage base;
     ChatSend    req;
     Codec::decode_base_message(buf, base);
     Codec::decode_payload(base, req);
 
-    // 广播给房间内其他人
     ChatReceive broadcast;
     broadcast.set_user_id(req.user_id());
     broadcast.set_room_id(req.room_id());
@@ -315,8 +409,223 @@ void SignalingServer::handle_chat(
 
     auto bcast_buf = Codec::encode_wrapped(
         static_cast<int>(MsgType::MSG_CHAT_RECEIVE), seq_id, broadcast);
-    // tcp_server_->broadcast(...)
-    LOG_DEBUG("Chat: user=%lu, room=%s", req.user_id(), req.room_id().c_str());
+    broadcast_to_room(req.room_id(), req.user_id(), std::move(bcast_buf));
+}
+
+// ── 新增媒体消息处理器 ────────────────────────────────────
+
+void SignalingServer::handle_media_relay_register(
+        const std::shared_ptr<TcpConnection>& conn,
+        uint64_t seq_id, Buffer& buf) {
+
+    BaseMessage       base;
+    MediaRelayRegister req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    MediaRelayRegisterResp resp;
+    uint32_t allocated_ssrc = 0;
+    std::string relay_host;
+    uint16_t relay_port = 0;
+
+    bool ok = media_relay_->register_participant(
+        req.user_id(), req.room_id(), "user",
+        req.relay_host(), req.relay_port(),
+        req.media_type(), allocated_ssrc, relay_host, relay_port);
+
+    resp.set_success(ok);
+    resp.set_allocated_host(relay_host);
+    resp.set_allocated_port(relay_port);
+    resp.set_ssrc(allocated_ssrc);
+
+    // 添加房间内其他参与者信息
+    auto participants = media_relay_->get_room_participants(req.room_id());
+    for (auto& p : participants) {
+        if (p.user_id == req.user_id()) continue;
+        auto* peer = resp.add_peers();
+        peer->set_user_id(p.user_id);
+        peer->set_nickname(p.nickname);
+        for (auto& [mt, si] : p.streams) {
+            peer->set_ssrc(si->ssrc);
+        }
+        peer->set_audio_on(p.audio_on);
+        peer->set_video_on(p.video_on);
+        peer->set_screen_share(p.screen_sharing);
+    }
+
+    auto resp_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_MEDIA_RELAY_REGISTER_RESP), seq_id, resp);
+    conn->send(std::move(resp_buf));
+
+    LOG_INFO("Media relay registered: user=%lu, room=%s, type=%s, ssrc=%u",
+             req.user_id(), req.room_id().c_str(), req.media_type().c_str(), allocated_ssrc);
+}
+
+void SignalingServer::handle_media_stats_report(
+        const std::shared_ptr<TcpConnection>& /*conn*/,
+        uint64_t /*seq_id*/, Buffer& buf) {
+
+    BaseMessage      base;
+    MediaStatsReport req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    media_relay_->report_stats(req.user_id(), req.room_id(),
+                                req.packet_loss_rate(), req.round_trip_time(),
+                                req.jitter_ms(), req.bitrate_kbps(),
+                                req.signal_quality());
+
+    // 自适应带宽: 检测是否需要发送带宽提示
+    uint32_t suggested = media_relay_->suggest_bitrate(req.user_id(), req.room_id());
+
+    // 如果需要调整，发送 BandwidthHint
+    BandwidthHint hint;
+    hint.set_user_id(req.user_id());
+    hint.set_max_bitrate_kbps(suggested);
+    hint.set_min_bitrate_kbps(suggested / 3);
+    hint.set_reason(suggested < 1000 ? "congestion" : "normal");
+
+    auto hint_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_BANDWIDTH_HINT), 0, hint);
+    send_to_user(req.user_id(), hint_buf.data(), hint_buf.readable_size());
+
+    LOG_DEBUG("Media stats from %lu: loss=%.2f%%, rtt=%.1fms, suggested=%ukbps",
+              req.user_id(), req.packet_loss_rate() * 100, req.round_trip_time(), suggested);
+}
+
+void SignalingServer::handle_media_control(
+        const std::shared_ptr<TcpConnection>& conn,
+        uint64_t seq_id, Buffer& buf) {
+
+    BaseMessage  base;
+    MediaControl req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    // 转给目标用户
+    MediaControl fwd;
+    fwd.set_target_user_id(req.target_user_id());
+    fwd.set_room_id(req.room_id());
+    fwd.set_media_type(req.media_type());
+    fwd.set_mute(req.mute());
+
+    auto fwd_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_MEDIA_CONTROL), seq_id, fwd);
+    send_to_user(req.target_user_id(), fwd_buf.data(), fwd_buf.readable_size());
+
+    // 更新媒体中继状态
+    if (req.media_type() == MediaControl::AUDIO) {
+        media_relay_->update_media_status(req.target_user_id(), req.room_id(),
+                                           !req.mute(), true);
+    } else if (req.media_type() == MediaControl::VIDEO) {
+        media_relay_->update_media_status(req.target_user_id(), req.room_id(),
+                                           true, !req.mute());
+    }
+
+    MediaControlAck ack;
+    ack.set_user_id(req.target_user_id());
+    ack.set_room_id(req.room_id());
+    ack.set_success(true);
+
+    auto ack_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_MEDIA_CONTROL_ACK), seq_id, ack);
+    conn->send(std::move(ack_buf));
+}
+
+void SignalingServer::handle_screen_share_req(
+        const std::shared_ptr<TcpConnection>& /*conn*/,
+        uint64_t seq_id, Buffer& buf) {
+
+    BaseMessage    base;
+    ScreenShareReq req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    // 广播屏幕共享状态给房间内所有人
+    ScreenShareNotify notify;
+    notify.set_user_id(req.user_id());
+    notify.set_room_id(req.room_id());
+    notify.set_started(req.start_share());
+    // nickname 从 meeting_service 获取
+    auto room = meeting_service_->get_room(req.room_id());
+    if (room) {
+        for (auto& p : room->participants) {
+            if (p.user_id == req.user_id()) {
+                notify.set_nickname(p.nickname);
+                break;
+            }
+        }
+    }
+
+    auto bcast_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_SCREEN_SHARE_NOTIFY), seq_id, notify);
+    broadcast_to_room(req.room_id(), 0, std::move(bcast_buf));
+
+    LOG_INFO("Screen share: user=%lu, room=%s, %s",
+             req.user_id(), req.room_id().c_str(),
+             req.start_share() ? "started" : "stopped");
+}
+
+void SignalingServer::handle_participant_role(
+        const std::shared_ptr<TcpConnection>& /*conn*/,
+        uint64_t seq_id, Buffer& buf) {
+
+    BaseMessage      base;
+    ParticipantRole  req;
+    Codec::decode_base_message(buf, base);
+    Codec::decode_payload(base, req);
+
+    // 转发角色变更
+    auto fwd_buf = Codec::encode_wrapped(
+        static_cast<int>(MsgType::MSG_PARTICIPANT_ROLE), seq_id, req);
+    broadcast_to_room(req.room_id(), 0, std::move(fwd_buf));
+
+    LOG_INFO("Role changed: user=%lu in room=%s to role=%d",
+             req.user_id(), req.room_id().c_str(), static_cast<int>(req.role()));
+}
+
+// ── 消息路由辅助 ───────────────────────────────────────────
+
+void SignalingServer::send_to_user(uint64_t user_id, const void* data, size_t len) {
+    uint64_t conn_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(user_conn_mutex_);
+        auto it = user_conn_map_.find(user_id);
+        if (it == user_conn_map_.end()) {
+            LOG_WARN("SEND-FAIL user=%llu not in user_conn_map (size=%zu)",
+                     user_id, user_conn_map_.size());
+            return;
+        }
+        conn_id = it->second;
+    }
+
+    // 精确定位到指定 conn_id 的连接
+    if (tcp_server_) {
+        LOG_INFO("SEND -> user=%llu conn=%llu size=%zuB", user_id, conn_id, len);
+        tcp_server_->send_to_conn(conn_id, data, len);
+    } else {
+        LOG_WARN("SEND-FAIL no tcp_server_");
+    }
+}
+
+void SignalingServer::broadcast_to_room(
+        const std::string& room_id, uint64_t exclude_user,
+        Buffer&& buf) {
+
+    auto room = meeting_service_->get_room(room_id);
+    if (!room) {
+        LOG_WARN("BROADCAST-FAIL room=%s not found", room_id.c_str());
+        return;
+    }
+
+    LOG_INFO("BROADCAST room=%s total=%zu exclude_user=%llu size=%zuB",
+             room_id.c_str(), room->participants.size(), exclude_user,
+             buf.readable_size());
+
+    for (auto& p : room->participants) {
+        if (p.user_id == exclude_user) continue;
+        send_to_user(p.user_id, buf.data(), buf.readable_size());
+    }
 }
 
 } // namespace wemeet

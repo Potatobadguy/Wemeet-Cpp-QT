@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package wemeet;
+
+// ── 媒体传输控制消息 ─────────────────────────────────────
+
+// 媒体流统计上报（客户端 → 服务器）
+message MediaStatsReport {
+    uint64 user_id           = 1;
+    string room_id           = 2;
+    double packet_loss_rate  = 3;   // 丢包率 (0.0 ~ 1.0)
+    double round_trip_time   = 4;   // RTT 毫秒
+    double jitter_ms         = 5;   // 抖动毫秒
+    uint32 bitrate_kbps      = 6;   // 当前接收码率
+    uint32 sent_bitrate_kbps = 7;   // 当前发送码率
+    int32  signal_quality    = 8;   // 信号质量 0-5
+}
+
+// 带宽调整建议（服务器 → 客户端）
+message BandwidthHint {
+    uint64 user_id           = 1;
+    uint32 max_bitrate_kbps  = 2;   // 建议最大上行码率
+    uint32 min_bitrate_kbps  = 3;   // 建议最小上行码率
+    string reason            = 4;   // "congestion" / "weak_signal" / "recovery"
+}
+
+// 媒体中继注册（客户端 → 服务器）
+message MediaRelayRegister {
+    uint64 user_id      = 1;
+    string room_id      = 2;
+    string relay_host   = 3;   // 客户端 UDP 接收地址
+    uint32 relay_port   = 4;   // 客户端 UDP 接收端口
+    string media_type   = 5;   // "video" / "audio" / "screen"
+}
+
+// 媒体中继注册响应（服务器 → 客户端）
+message MediaRelayRegisterResp {
+    bool   success       = 1;
+    string allocated_host = 2;  // 服务器分配的中继地址
+    uint32 allocated_port = 3;  // 服务器分配的中继端口
+    uint32 ssrc          = 4;  // 分配的同步源标识符
+    repeated PeerInfo peers = 5;
+}
+
+message PeerInfo {
+    uint64 user_id      = 1;
+    string nickname     = 2;
+    uint32 ssrc         = 3;
+    bool   audio_on     = 4;
+    bool   video_on     = 5;
+    bool   screen_share = 6;
+}
+
+// ── 屏幕共享消息 ─────────────────────────────────────────
+message ScreenShareReq {
+    uint64 user_id     = 1;
+    string room_id     = 2;
+    bool   start_share = 3;  // true=开始共享 false=停止共享
+}
+
+message ScreenShareNotify {
+    uint64 user_id       = 1;
+    string nickname      = 2;
+    bool   started       = 3;  // true=开始共享 false=停止共享
+    string room_id       = 4;
+}
+
+// ── 媒体控制消息 ─────────────────────────────────────────
+message MediaControl {
+    uint64 target_user_id = 1;
+    string room_id        = 2;
+    enum MediaType {
+        AUDIO = 0;
+        VIDEO = 1;
+        SCREEN = 2;
+    }
+    MediaType media_type  = 3;
+    bool      mute        = 4;    // true=mute/disable
+}
+
+message MediaControlAck {
+    uint64 user_id        = 1;
+    string room_id        = 2;
+    bool   success        = 3;
+}
+
+// ── 参与者权限消息 ──────────────────────────────────────
+message ParticipantRole {
+    uint64 user_id      = 1;
+    string room_id      = 2;
+    enum Role {
+        HOST      = 0;
+        CO_HOST   = 1;
+        SPEAKER   = 2;
+        LISTENER  = 3;
+    }
+    Role role           = 3;
+}
+
+// ── 网络质量报告 ─────────────────────────────────────────
+message NetworkQualityReport {
+    uint64 user_id        = 1;
+    string room_id        = 2;
+    // 0=unknown, 1=excellent, 2=good, 3=moderate, 4=poor, 5=dead
+    int32  uplink_quality = 3;
+    int32  downlink_quality = 4;
+}

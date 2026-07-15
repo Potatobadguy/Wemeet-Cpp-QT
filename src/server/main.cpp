@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
     Logger::instance().set_level(LogLevel::INFO);
     Logger::instance().set_console(true);
 
-    LOG_INFO("WeMeet Signaling Server v1.0.0");
+    LOG_INFO("WeMeet Signaling Server v2.0.0");
     LOG_INFO("Listening on %s:%u", config.listen_ip.c_str(), config.listen_port);
 
     // ── 注册信号处理 ─────────────────────────────────────

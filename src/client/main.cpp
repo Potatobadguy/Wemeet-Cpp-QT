@@ -72,13 +72,20 @@ int main(int argc, char* argv[]) {
     login_dialog.setWindowTitle("WeMeet — 登录");
 
     QObject::connect(&login_dialog, &LoginDialog::login_success,
-                     [&main_window]() {
+                     [&main_window, &login_dialog](uint64_t user_id, const QString& nickname) {
+        main_window.on_login_success(user_id, nickname);
         main_window.show();
         main_window.raise();
         main_window.activateWindow();
+        // 关闭登录对话框（accept 返回 DialogCode::Accepted）
+        login_dialog.accept();
     });
 
-    login_dialog.exec();
+    if (login_dialog.exec() == QDialog::Accepted) {
+        // 登录成功，进入主事件循环
+        return app.exec();
+    }
 
-    return app.exec();
+    // 用户取消登录
+    return 0;
 }

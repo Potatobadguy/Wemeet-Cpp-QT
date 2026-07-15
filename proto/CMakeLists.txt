@@ -4,6 +4,7 @@ set(PROTO_FILES
     auth.proto
     meeting.proto
     signaling.proto
+    media.proto
 )
 
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})

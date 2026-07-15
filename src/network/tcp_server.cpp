@@ -107,4 +107,21 @@ void TcpServer::broadcast(const void* data, size_t len) {
     }
 }
 
+std::shared_ptr<TcpConnection> TcpServer::get_connection(uint64_t conn_id) {
+    size_t shard_idx = conn_id % kShardCount;
+    std::lock_guard<std::mutex> lock(shards_[shard_idx].mutex);
+    auto it = shards_[shard_idx].connections.find(conn_id);
+    if (it != shards_[shard_idx].connections.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+void TcpServer::send_to_conn(uint64_t conn_id, const void* data, size_t len) {
+    auto conn = get_connection(conn_id);
+    if (conn && conn->connected()) {
+        conn->send(data, len);
+    }
+}
+
 } // namespace wemeet

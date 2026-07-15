@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QQueue>
 #include <functional>
 #include <cstdint>
 
@@ -51,4 +52,8 @@ private:
     QByteArray  recv_buffer_;
     static constexpr int kMaxReconnectAttempts = 5;
     static constexpr int kReconnectIntervalMs  = 3000;
+
+    // 发送队列（未连接时缓存）
+    QQueue<QByteArray> send_queue_;
+    static constexpr int kMaxQueueSize = 100;
 };
