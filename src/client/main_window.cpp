@@ -14,6 +14,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // 默认显示大厅页
     stack_->setCurrentIndex(PAGE_LOBBY);
+    update_back_button();   // 大厅页无历史，隐藏返回按钮
 }
 
 MainWindow::~MainWindow() = default;
@@ -69,11 +70,30 @@ void MainWindow::setup_ui() {
     // ── 会议页 ───────────────────────────────────────────
     meeting_page_ = new MeetingRoom(this);
     stack_->addWidget(meeting_page_);
+
+    // 会议室的返回信号 → 使用导航历史返回
+    connect(meeting_page_, &MeetingRoom::back_to_lobby,
+            this, &MainWindow::on_back_requested);
+    connect(meeting_page_, &MeetingRoom::leave_meeting,
+            this, &MainWindow::on_logout);
 }
 
 void MainWindow::setup_navigation() {
     nav_bar_ = new QWidget(this);
     auto* nav_layout = new QHBoxLayout(nav_bar_);
+    nav_layout->setContentsMargins(12, 8, 12, 8);
+    nav_layout->setSpacing(12);
+
+    // 返回按钮（左上角，左箭头 + 文字）
+    back_btn_ = new QPushButton("←  返回");
+    back_btn_->setCursor(Qt::PointingHandCursor);
+    back_btn_->setStyleSheet(
+        "QPushButton { background: transparent; color: #4A90D9; "
+        "border: 1px solid #4A90D9; padding: 6px 16px; border-radius: 6px; "
+        "font-size: 14px; font-weight: bold; }"
+        "QPushButton:hover { background: #4A90D9; color: white; }"
+        "QPushButton:disabled { color: #ccc; border-color: #ddd; background: transparent; }");
+    back_btn_->hide();   // 初始无历史，隐藏
 
     user_label_ = new QLabel("WeMeet");
     user_label_->setStyleSheet("color: #333333; font-size: 16px; font-weight: bold; background: transparent;");
@@ -84,15 +104,48 @@ void MainWindow::setup_navigation() {
         "padding: 6px 16px; border-radius: 4px; }"
         "QPushButton:hover { background: #FF6B6B; color: white; }");
 
+    nav_layout->addWidget(back_btn_);
     nav_layout->addWidget(user_label_);
     nav_layout->addStretch();
     nav_layout->addWidget(logout_btn_);
 
-    nav_bar_->setStyleSheet("background: #ffffff; padding: 8px; border-bottom: 1px solid #e8edf5;");
+    nav_bar_->setStyleSheet("background: #ffffff; border-bottom: 1px solid #e8edf5;");
     nav_bar_->setFixedHeight(48);
     nav_bar_->hide();
 
+    connect(back_btn_,   &QPushButton::clicked, this, &MainWindow::on_back_requested);
     connect(logout_btn_, &QPushButton::clicked, this, &MainWindow::on_logout);
+}
+
+// ── 导航历史管理 ───────────────────────────────────────────
+void MainWindow::navigate_to(int page) {
+    // 将当前页面压入历史栈
+    nav_history_.push(stack_->currentIndex());
+    stack_->setCurrentIndex(page);
+    update_back_button();
+}
+
+void MainWindow::go_back() {
+    if (!nav_history_.isEmpty()) {
+        int prev = nav_history_.pop();
+        stack_->setCurrentIndex(prev);
+    } else {
+        // 无历史记录时，安全回退到大厅
+        stack_->setCurrentIndex(PAGE_LOBBY);
+    }
+    update_back_button();
+}
+
+void MainWindow::update_back_button() {
+    // 在大厅页且无历史时隐藏返回按钮，其他情况显示
+    bool has_history = !nav_history_.isEmpty();
+    bool on_lobby = (stack_->currentIndex() == PAGE_LOBBY);
+    back_btn_->setVisible(has_history || !on_lobby);
+    back_btn_->setEnabled(has_history || !on_lobby);
+}
+
+void MainWindow::on_back_requested() {
+    go_back();
 }
 
 // ── 槽函数 ───────────────────────────────────────────────
@@ -100,22 +153,25 @@ void MainWindow::on_login_success(uint64_t user_id, const QString& nickname) {
     current_user_id_ = user_id;
     user_label_->setText(nickname);
     nav_bar_->show();
+    nav_history_.clear();
     stack_->setCurrentIndex(PAGE_LOBBY);
+    update_back_button();
 }
 
 void MainWindow::on_create_meeting() {
-    stack_->setCurrentIndex(PAGE_MEETING);
+    navigate_to(PAGE_MEETING);
     meeting_page_->set_room_info("meeting_" + QString::number(current_user_id_),
                                   "我的会议室");
 }
 
 void MainWindow::on_join_meeting(const QString& room_id) {
-    stack_->setCurrentIndex(PAGE_MEETING);
+    navigate_to(PAGE_MEETING);
     meeting_page_->set_room_info(room_id, "会议室: " + room_id);
 }
 
 void MainWindow::on_logout() {
     current_user_id_ = 0;
     nav_bar_->hide();
+    nav_history_.clear();
     stack_->setCurrentIndex(PAGE_LOBBY);
 }

@@ -8,6 +8,10 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFrame>
+#include <QCamera>
+#include <QMediaCaptureSession>
+#include <QVideoWidget>
+#include <QMediaDevices>
 #include <vector>
 
 /**
@@ -22,18 +26,21 @@ class MeetingRoom : public QWidget {
     Q_OBJECT
 public:
     explicit MeetingRoom(QWidget* parent = nullptr);
+    ~MeetingRoom();
 
     void set_room_info(const QString& room_id, const QString& title);
-    void add_participant(uint64_t user_id, const QString& nickname);
+    void add_participant(uint64_t user_id, const QString& nickname, bool is_local = false);
     void remove_participant(uint64_t user_id);
 
 signals:
     void leave_meeting();
+    void back_to_lobby();
 
 private slots:
     void on_mute_toggled();
     void on_video_toggled();
     void on_hangup();
+    void on_back();
     void on_send_chat();
 
 private:
@@ -44,10 +51,12 @@ private:
 
     struct VideoTile {
         QFrame*     frame;
-        QLabel*     label;
+        QLabel*     avatar_label;     // 视频关闭时显示的头像
+        QVideoWidget* video_widget;   // 视频开启时的摄像头画面
         QLabel*     name_label;
         uint64_t    user_id;
         bool        video_on = true;
+        bool        is_local = false; // 是否本地用户
     };
 
     // ── UI 元素 ───────────────────────────────────────────
@@ -58,6 +67,7 @@ private:
     QPushButton* mute_btn_;
     QPushButton* video_btn_;
     QPushButton* share_btn_;
+    QPushButton* back_btn_;
     QPushButton* hangup_btn_;
     bool mic_muted_  = false;
     bool video_off_  = false;
@@ -69,4 +79,9 @@ private:
 
     // ── 参与者 ───────────────────────────────────────────
     std::vector<VideoTile> participants_;
+
+    // ── 本地摄像头 ────────────────────────────────────────
+    std::unique_ptr<QCamera> camera_;
+    std::unique_ptr<QMediaCaptureSession> capture_session_;
+    bool camera_active_ = false;
 };

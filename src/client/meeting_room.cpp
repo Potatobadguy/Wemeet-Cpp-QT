@@ -2,6 +2,9 @@
 #include <QSplitter>
 #include <QScrollArea>
 #include <QLineEdit>
+#include <QMediaDevices>
+#include <QCameraDevice>
+#include <memory>
 
 MeetingRoom::MeetingRoom(QWidget* parent)
     : QWidget(parent) {
@@ -40,20 +43,42 @@ MeetingRoom::MeetingRoom(QWidget* parent)
     main_layout->addWidget(splitter);
 
     setStyleSheet("QWidget { background: #0a0a1a; }");
+
+    // 初始化本地摄像头（默认不启动，进入房间后由 set_room_info 触发）
+    const auto cameras = QMediaDevices::videoInputs();
+    if (!cameras.isEmpty()) {
+        camera_ = std::make_unique<QCamera>(cameras.first());
+        capture_session_ = std::make_unique<QMediaCaptureSession>();
+        capture_session_->setCamera(camera_.get());
+    }
+}
+
+MeetingRoom::~MeetingRoom() {
+    if (camera_ && camera_->isActive()) {
+        camera_->stop();
+    }
 }
 
 void MeetingRoom::set_room_info(const QString& room_id, const QString& title) {
     room_title_->setText(title + "  [" + room_id + "]");
 
-    // 添加模拟参与者（演示用）
-    add_participant(1, "我");
-    add_participant(2, "张三");
-    add_participant(3, "李四");
+    // 清空旧参与者
+    participants_.clear();
+
+    // 添加本地用户 + 模拟远端参与者
+    add_participant(1, "我", true);
+    add_participant(2, "张三", false);
+    add_participant(3, "李四", false);
+
+    // 默认开启本地摄像头
+    on_video_toggled();
 }
 
-void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname) {
+void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname, bool is_local) {
     VideoTile tile;
-    tile.user_id = user_id;
+    tile.user_id   = user_id;
+    tile.is_local  = is_local;
+    tile.video_on  = is_local;  // 本地默认开视频，远端默认占位
 
     tile.frame = new QFrame();
     tile.frame->setStyleSheet(
@@ -62,17 +87,31 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname) {
     tile.frame->setMinimumSize(240, 180);
 
     auto* inner = new QVBoxLayout(tile.frame);
-    tile.label = new QLabel(nickname.mid(0, 1).toUpper());
-    tile.label->setAlignment(Qt::AlignCenter);
-    tile.label->setStyleSheet("color: #4A90D9; font-size: 36px; font-weight: bold;");
+    inner->setContentsMargins(8, 8, 8, 8);
+
+    // 头像占位（视频关闭时显示）
+    tile.avatar_label = new QLabel(nickname.mid(0, 1).toUpper());
+    tile.avatar_label->setAlignment(Qt::AlignCenter);
+    tile.avatar_label->setStyleSheet("color: #4A90D9; font-size: 36px; font-weight: bold;");
+
+    // 本地用户创建视频控件
+    if (is_local && camera_) {
+        tile.video_widget = new QVideoWidget();
+        tile.video_widget->setStyleSheet("QVideoWidget { border-radius: 10px; background: black; }");
+        tile.video_widget->setMinimumSize(220, 160);
+        capture_session_->setVideoOutput(tile.video_widget);
+        tile.avatar_label->hide();
+        inner->addWidget(tile.video_widget, 1, Qt::AlignCenter);
+    } else {
+        tile.video_widget = nullptr;
+        inner->addStretch();
+        inner->addWidget(tile.avatar_label, 0, Qt::AlignCenter);
+        inner->addStretch();
+    }
 
     tile.name_label = new QLabel(nickname);
     tile.name_label->setAlignment(Qt::AlignCenter);
     tile.name_label->setStyleSheet("color: #aaa; font-size: 12px; padding: 4px;");
-
-    inner->addStretch();
-    inner->addWidget(tile.label, 0, Qt::AlignCenter);
-    inner->addStretch();
     inner->addWidget(tile.name_label);
 
     participants_.push_back(tile);
@@ -88,7 +127,6 @@ void MeetingRoom::remove_participant(uint64_t user_id) {
 }
 
 void MeetingRoom::update_gallery_layout() {
-    // 清空旧布局
     while (gallery_layout_->count() > 0) {
         auto* item = gallery_layout_->takeAt(0);
         if (item->widget()) {
@@ -98,7 +136,6 @@ void MeetingRoom::update_gallery_layout() {
         delete item;
     }
 
-    // 自适应网格: 1/2/4/9等
     int count = static_cast<int>(participants_.size());
     int cols = 1;
     if (count > 1) cols = 2;
@@ -138,14 +175,20 @@ void MeetingRoom::setup_control_bar() {
     share_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }");
     bar_layout->addWidget(share_btn_);
 
+    back_btn_ = new QPushButton("⬅ 返回");
+    back_btn_->setStyleSheet(btn_base + "QPushButton { background: #666; }"
+                              "QPushButton:hover { background: #555; }");
+
     hangup_btn_ = new QPushButton("📞 挂断");
     hangup_btn_->setStyleSheet(btn_base + "QPushButton { background: #E74C3C; }"
                                "QPushButton:hover { background: #C0392B; }");
 
     connect(mute_btn_,  &QPushButton::clicked, this, &MeetingRoom::on_mute_toggled);
     connect(video_btn_, &QPushButton::clicked, this, &MeetingRoom::on_video_toggled);
+    connect(back_btn_,  &QPushButton::clicked, this, &MeetingRoom::on_back);
     connect(hangup_btn_, &QPushButton::clicked, this, &MeetingRoom::on_hangup);
 
+    bar_layout->addWidget(back_btn_);
     bar_layout->addWidget(hangup_btn_);
     bar_layout->addStretch();
 }
@@ -194,14 +237,45 @@ void MeetingRoom::on_mute_toggled() {
 
 void MeetingRoom::on_video_toggled() {
     video_off_ = !video_off_;
+
     video_btn_->setText(video_off_ ? "📷 已关闭" : "📹 摄像头");
     video_btn_->setStyleSheet(video_off_
         ? "QPushButton { background: #E74C3C; color: white; padding: 10px 20px; border-radius: 8px; }"
         : "QPushButton { background: #444; color: white; padding: 10px 20px; border-radius: 8px; }");
+
+    if (!camera_) return;
+
+    // 找到本地用户视频控件
+    for (auto& tile : participants_) {
+        if (!tile.is_local || !tile.video_widget) continue;
+
+        if (video_off_) {
+            camera_->stop();
+            tile.video_widget->hide();
+            tile.avatar_label->show();
+            tile.video_on = false;
+        } else {
+            tile.avatar_label->hide();
+            tile.video_widget->show();
+            camera_->start();
+            tile.video_on = true;
+        }
+        break;
+    }
 }
 
 void MeetingRoom::on_hangup() {
+    if (camera_ && camera_->isActive()) {
+        camera_->stop();
+    }
     emit leave_meeting();
+}
+
+void MeetingRoom::on_back() {
+    if (camera_ && camera_->isActive()) {
+        camera_->stop();
+    }
+    emit back_to_lobby();
 }
 
 void MeetingRoom::on_send_chat() {

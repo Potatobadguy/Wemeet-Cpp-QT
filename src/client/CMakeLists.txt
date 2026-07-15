@@ -2,7 +2,7 @@
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Multimedia MultimediaWidgets)
 
 qt_add_executable(wemeet_client
     main.cpp
@@ -17,6 +17,7 @@ target_link_libraries(wemeet_client PRIVATE
     Qt6::Widgets
     Qt6::Network
     Qt6::Multimedia
+    Qt6::MultimediaWidgets
     wemeet_proto
 )
 
