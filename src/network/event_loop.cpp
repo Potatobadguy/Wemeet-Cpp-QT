@@ -87,8 +87,25 @@ void EventLoop::loop() {
 
             // 可读事件
             if (ev & EPOLLIN) {
-                // 回调由外部注册 — 这里只处理定时器 fd 和 wakeup_fd
-                // 普通 fd 的回调在外部 tcp_connection 中处理
+                // 普通 fd 的回调（连接等）
+                ReadCallback cb;
+                {
+                    std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
+                    auto it = fd_read_callbacks_.find(fd);
+                    if (it != fd_read_callbacks_.end()) cb = it->second;
+                }
+                if (cb) cb();
+            }
+
+            // 可写事件
+            if (ev & EPOLLOUT) {
+                ReadCallback cb;
+                {
+                    std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
+                    auto it = fd_read_callbacks_.find(fd);
+                    if (it != fd_read_callbacks_.end()) cb = it->second;
+                }
+                if (cb) cb();
             }
         }
     }
@@ -103,9 +120,12 @@ void EventLoop::quit() {
 }
 
 // ── IO 事件管理 ──────────────────────────────────────────
-void EventLoop::add_read_event(int fd, ReadCallback /*cb*/) {
+void EventLoop::add_read_event(int fd, ReadCallback cb) {
+    {
+        std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
+        fd_read_callbacks_[fd] = std::move(cb);
+    }
     update_channel(fd, EPOLLIN | EPOLLET);
-    // 回调通过外部存储管理（tcp_connection 持有）
 }
 
 void EventLoop::enable_write(int fd) {
@@ -117,6 +137,10 @@ void EventLoop::disable_write(int fd) {
 }
 
 void EventLoop::remove_fd(int fd) {
+    {
+        std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
+        fd_read_callbacks_.erase(fd);
+    }
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 

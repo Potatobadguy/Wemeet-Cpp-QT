@@ -52,7 +52,7 @@ public:
     std::shared_ptr<TcpConnection> get_connection(uint64_t conn_id);
 
 private:
-    void handle_accept();
+    void handle_accept(Socket conn_sock, const sockaddr_in& peer_addr);
 
     EventLoop*          main_loop_;
     EventLoopPool*      pool_;

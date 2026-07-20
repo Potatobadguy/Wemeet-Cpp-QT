@@ -21,9 +21,17 @@ TcpConnection::~TcpConnection() {
 
 // ── 启动：注册到 EventLoop ──────────────────────────────
 void TcpConnection::start() {
-    // 实际注册由 TcpServer 管理
-    // EventLoop 的 fd→connection 映射在 TcpServer 层维护
+    // 注册读/写事件到子 EventLoop
+    auto self = shared_from_this();
+    loop_->add_read_event(sock_.fd(), [self]() {
+        self->handle_read();
+        // 写事件也由同一回调处理（同时检测 handle_write 状态）
+        if (self->writing_.load(std::memory_order_acquire)) {
+            self->handle_write();
+        }
+    });
     connected_.store(true, std::memory_order_release);
+    LOG_DEBUG("TcpConnection started: conn_id=%lu, fd=%d", conn_id_, sock_.fd());
 }
 
 // ── 优雅关闭 ─────────────────────────────────────────────
@@ -76,6 +84,8 @@ void TcpConnection::send_in_loop(Buffer buf) {
 
             ssize_t n = ::write(self->sock_.fd(), buf.data(), buf.readable_size());
             if (n > 0) {
+                LOG_DEBUG("SEND_DIRECT conn_id=%lu fd=%d: %zd of %zu bytes",
+                          self->conn_id(), self->sock_.fd(), n, buf.readable_size());
                 buf.retrieve(n);
                 if (buf.readable_size() == 0) return;  // 写完
             } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -90,6 +100,8 @@ void TcpConnection::send_in_loop(Buffer buf) {
             self->write_buf_.append(buf.data(), buf.readable_size());
             self->writing_.store(true, std::memory_order_release);
             self->loop_->enable_write(self->sock_.fd());
+            LOG_DEBUG("SEND_BUFFERED conn_id=%lu fd=%d: %zu bytes queued",
+                      self->conn_id(), self->sock_.fd(), buf.readable_size());
         }
     });
 }
@@ -111,6 +123,7 @@ void TcpConnection::handle_read() {
 
     if (n > 0) {
         read_buf_.append(extrabuf, n);
+        LOG_DEBUG("RECV conn_id=%lu fd=%d: %zd bytes", conn_id_, sock_.fd(), n);
 
         // 尝试解码消息: 4字节大端长度头 + Protobuf body
         while (read_buf_.readable_size() >= 4) {
@@ -125,6 +138,7 @@ void TcpConnection::handle_read() {
 
             // 完整消息 → 回调
             read_buf_.retrieve(4);  // 跳过长度头
+            LOG_INFO("MSG_RECV conn_id=%lu body_len=%u", conn_id_, body_len);
             if (message_cb_) {
                 message_cb_(shared_from_this(), read_buf_);
             }

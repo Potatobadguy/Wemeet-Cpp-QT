@@ -103,6 +103,10 @@ private:
     int                         next_timer_id_ = 1;
     std::map<int, std::unique_ptr<TimerEntry>> timers_;
 
+    // fd → 读事件回调（连接 fd 的处理函数）
+    std::map<int, ReadCallback>  fd_read_callbacks_;
+    std::mutex                  fd_callbacks_mutex_;
+
     // epoll_event 预分配
     std::vector<epoll_event>    events_;
 };

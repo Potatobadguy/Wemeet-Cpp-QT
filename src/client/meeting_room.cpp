@@ -58,7 +58,7 @@ void MeetingRoom::setup_ui() {
     quality_indicator_->setToolTip("网络质量");
 
     // 参会人数指示
-    participant_count_label_ = new QLabel("👤 0");
+    participant_count_label_ = new QLabel(" 0");
     participant_count_label_->setStyleSheet(
         "color: #aaa; font-size: 12px; padding: 4px 8px; "
         "background: rgba(255,255,255,0.1); border-radius: 10px;");
@@ -90,22 +90,22 @@ void MeetingRoom::setup_ui() {
         "QPushButton { padding: 10px 20px; border-radius: 8px; font-size: 13px; "
         "color: white; border: none; min-width: 80px; font-weight: bold; }";
 
-    mute_btn_ = new QPushButton("🎤 静音");
+    mute_btn_ = new QPushButton("MIC 静音");
     mute_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                               "QPushButton:hover { background: #555; }");
     mute_btn_->setCursor(Qt::PointingHandCursor);
 
-    video_btn_ = new QPushButton("📹 摄像头");
+    video_btn_ = new QPushButton("CAM 摄像头");
     video_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                "QPushButton:hover { background: #555; }");
     video_btn_->setCursor(Qt::PointingHandCursor);
 
-    share_btn_ = new QPushButton("🖥 共享");
+    share_btn_ = new QPushButton("SCR 共享");
     share_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                "QPushButton:hover { background: #555; }");
     share_btn_->setCursor(Qt::PointingHandCursor);
 
-    members_btn_ = new QPushButton("👥 成员");
+    members_btn_ = new QPushButton("USR 成员");
     members_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                  "QPushButton:hover { background: #555; }");
     members_btn_->setCursor(Qt::PointingHandCursor);
@@ -116,7 +116,7 @@ void MeetingRoom::setup_ui() {
                               "QPushButton:hover { background: #555; }");
     back_btn_->setCursor(Qt::PointingHandCursor);
 
-    hangup_btn_ = new QPushButton("📞 挂断");
+    hangup_btn_ = new QPushButton("END 挂断");
     hangup_btn_->setStyleSheet(btn_base + "QPushButton { background: #E74C3C; }"
                                 "QPushButton:hover { background: #C0392B; }");
     hangup_btn_->setCursor(Qt::PointingHandCursor);
@@ -151,7 +151,7 @@ void MeetingRoom::setup_ui() {
     auto* chat_layout = new QVBoxLayout(chat_panel_);
     chat_layout->setContentsMargins(0, 0, 0, 0);
 
-    auto* chat_title = new QLabel("💬 聊天");
+    auto* chat_title = new QLabel("CHAT 聊天");
     chat_title->setStyleSheet("color: #eee; font-size: 14px; font-weight: bold; "
                                "padding: 8px; background: #1a1a2e; border-radius: 4px;");
 
@@ -163,24 +163,41 @@ void MeetingRoom::setup_ui() {
         "border-radius: 4px; padding: 8px; font-size: 12px; }");
 
     auto* input_row = new QHBoxLayout();
+    input_row->setSpacing(6);
     chat_input_ = new QLineEdit();
     chat_input_->setPlaceholderText("输入消息...");
+    chat_input_->setClearButtonEnabled(true);
+    chat_input_->setMinimumHeight(40);
+    chat_input_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    chat_input_->setFocusPolicy(Qt::StrongFocus);
     chat_input_->setStyleSheet(
-        "QLineEdit { background: #1a1a2e; color: #eee; border: 1px solid #333; "
-        "border-radius: 4px; padding: 8px; }");
+        "QLineEdit { background: #1a1a2e; color: #eee; border: 1px solid #444; "
+        "border-radius: 6px; padding: 8px 12px; font-size: 13px; }"
+        "QLineEdit:focus { border-color: #4A90D9; background: #232336; }");
 
     send_btn_ = new QPushButton("发送");
+    send_btn_->setMinimumHeight(40);
+    send_btn_->setMinimumWidth(60);
+    send_btn_->setCursor(Qt::PointingHandCursor);
+    send_btn_->setFocusPolicy(Qt::NoFocus);  // 不抢输入框的 Enter
+    send_btn_->setAutoDefault(false);
+    send_btn_->setDefault(false);
     send_btn_->setStyleSheet(
         "QPushButton { background: #4A90D9; color: white; padding: 8px 16px; "
-        "border-radius: 4px; font-weight: bold; }"
-        "QPushButton:hover { background: #357ABD; }");
+        "border-radius: 6px; font-weight: bold; font-size: 13px; }"
+        "QPushButton:hover { background: #357ABD; }"
+        "QPushButton:pressed { background: #2A5F9E; }");
 
-    input_row->addWidget(chat_input_);
+    input_row->addWidget(chat_input_, 1);
     input_row->addWidget(send_btn_);
 
     chat_layout->addWidget(chat_title);
     chat_layout->addWidget(chat_display_, 1);
     chat_layout->addLayout(input_row);
+
+    // 让 input_row 不会被压扁
+    chat_layout->setStretchFactor(chat_display_, 1);
+    chat_layout->setStretchFactor(input_row, 0);
 
     gallery_page_layout->addWidget(chat_panel_, 1);
 
@@ -190,7 +207,7 @@ void MeetingRoom::setup_ui() {
     member_panel_ = new QWidget();
     auto* member_layout = new QVBoxLayout(member_panel_);
 
-    auto* member_title = new QLabel("👥 参会成员");
+    auto* member_title = new QLabel("USR 参会成员");
     member_title->setStyleSheet("color: #eee; font-size: 16px; font-weight: bold; "
                                  "padding: 12px; background: #1a1a2e;");
 
@@ -201,7 +218,7 @@ void MeetingRoom::setup_ui() {
         "QListWidget::item { padding: 12px; border-bottom: 1px solid #222; }"
         "QListWidget::item:hover { background: #1a1a2e; }");
 
-    auto* member_back_btn = new QPushButton("← 返回画廊");
+    auto* member_back_btn = new QPushButton("<- 返回画廊");
     member_back_btn->setStyleSheet(
         "QPushButton { background: #4A90D9; color: white; padding: 10px; "
         "border-radius: 4px; font-weight: bold; }");
@@ -249,6 +266,11 @@ void MeetingRoom::set_room_info(const QString& room_id, const QString& title,
     nickname_ = nickname;
 
     room_title_->setText(title + "  [" + room_id + "]");
+
+    // 进入会议室后自动聚焦到聊天输入框（方便用户立即发言）
+    QTimer::singleShot(300, this, [this]() {
+        if (chat_input_) chat_input_->setFocus();
+    });
 
     // 清理后重新填充
     participants_.clear();
@@ -371,11 +393,11 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
     tile.mute_indicator->setStyleSheet(
         audio_on ? "QPushButton { background: transparent; font-size: 14px; }"
                  : "QPushButton { background: #E74C3C; color: white; border-radius: 12px; font-size: 12px; }");
-    tile.mute_indicator->setText(audio_on ? "🔊" : "🔇");
+    tile.mute_indicator->setText(audio_on ? "SOUND" : "MUTE");
     tile.mute_indicator->setFlat(true);
     tile.mute_indicator->setEnabled(false);
 
-    tile.name_label = new QLabel(nickname + (is_host ? " 👑" : ""));
+    tile.name_label = new QLabel(nickname + (is_host ? " *" : ""));
     tile.name_label->setAlignment(Qt::AlignCenter);
     tile.name_label->setStyleSheet("color: #aaa; font-size: 12px; padding: 2px;"
                                     "background: transparent;");
@@ -393,7 +415,7 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
     inner->addLayout(info_row);
 
     participants_.push_back(tile);
-    participant_count_label_->setText(QString("👤 %1").arg(participants_.size()));
+    participant_count_label_->setText(QString(" %1").arg(participants_.size()));
     rebuild_gallery();
 }
 
@@ -406,7 +428,7 @@ void MeetingRoom::remove_participant(uint64_t user_id) {
             media_engine_->remove_remote_video_widget(user_id);
         }
         participants_.erase(it, participants_.end());
-        participant_count_label_->setText(QString("👤 %1").arg(participants_.size()));
+        participant_count_label_->setText(QString(" %1").arg(participants_.size()));
         rebuild_gallery();
     }
 }
@@ -419,7 +441,7 @@ void MeetingRoom::update_participant(uint64_t user_id, bool audio_on, bool video
     tile->video_on = video_on;
 
     if (tile->mute_indicator) {
-        tile->mute_indicator->setText(audio_on ? "🔊" : "🔇");
+        tile->mute_indicator->setText(audio_on ? "SOUND" : "MUTE");
         tile->mute_indicator->setStyleSheet(
             audio_on ? "QPushButton { background: transparent; font-size: 14px; }"
                      : "QPushButton { background: #E74C3C; color: white; border-radius: 12px; font-size: 12px; }");
@@ -492,7 +514,7 @@ void MeetingRoom::update_network_quality(int32_t quality) {
 
 void MeetingRoom::on_mute_toggled() {
     mic_muted_ = !mic_muted_;
-    mute_btn_->setText(mic_muted_ ? "🔇 已静音" : "🎤 静音");
+    mute_btn_->setText(mic_muted_ ? "MUTE 已静音" : "MIC 静音");
     mute_btn_->setStyleSheet(mic_muted_
         ? "QPushButton { background: #E74C3C; color: white; padding: 10px 20px; "
           "border-radius: 8px; font-weight: bold; }"
@@ -508,7 +530,7 @@ void MeetingRoom::on_mute_toggled() {
 
 void MeetingRoom::on_video_toggled() {
     video_off_ = !video_off_;
-    video_btn_->setText(video_off_ ? "📷 已关闭" : "📹 摄像头");
+    video_btn_->setText(video_off_ ? "CAM 已关闭" : "CAM 摄像头");
     video_btn_->setStyleSheet(video_off_
         ? "QPushButton { background: #E74C3C; color: white; padding: 10px 20px; "
           "border-radius: 8px; font-weight: bold; }"
@@ -541,7 +563,7 @@ void MeetingRoom::on_share_toggled() {
     if (sharing_) {
         // 停止共享
         media_engine_->stop_screen_share();
-        share_btn_->setText("🖥 共享");
+        share_btn_->setText("SCR 共享");
         share_btn_->setStyleSheet(
             "QPushButton { background: #444; color: white; padding: 10px 20px; "
             "border-radius: 8px; font-weight: bold; }");
@@ -635,12 +657,12 @@ void MeetingRoom::on_participant_context_menu(uint64_t user_id) {
         "QMenu::item:hover { background: #4A90D9; }");
 
     QAction* mute_audio_act = menu.addAction(
-        tile->audio_on ? "🔇 静音麦克风" : "🔊 取消静音");
+        tile->audio_on ? "MUTE 静音麦克风" : "SOUND 取消静音");
     QAction* mute_video_act = menu.addAction(
-        tile->video_on ? "📷 关闭摄像头" : "📹 开启摄像头");
+        tile->video_on ? "CAM 关闭摄像头" : "CAM 开启摄像头");
     menu.addSeparator();
-    QAction* set_host_act = menu.addAction("👑 设为主持人");
-    QAction* remove_act = menu.addAction("🚫 移出会议");
+    QAction* set_host_act = menu.addAction("* 设为主持人");
+    QAction* remove_act = menu.addAction("X 移出会议");
 
     QAction* selected = menu.exec(QCursor::pos());
     if (selected == mute_audio_act) {
@@ -708,9 +730,9 @@ void MeetingRoom::rebuild_member_list() {
     member_list_->clear();
     for (auto& p : participants_) {
         QString text = p.nickname;
-        if (p.is_host) text += " 👑";
-        text += p.audio_on ? "  🔊" : "  🔇";
-        text += p.video_on ? "  📹" : "  📷";
+        if (p.is_host) text += " *";
+        text += p.audio_on ? "  SOUND" : "  MUTE";
+        text += p.video_on ? "  CAM" : "  CAM";
 
         auto* item = new QListWidgetItem(text, member_list_);
         item->setData(Qt::UserRole, static_cast<qulonglong>(p.user_id));

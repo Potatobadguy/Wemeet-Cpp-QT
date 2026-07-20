@@ -6,10 +6,11 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QObject>
+#include <QMessageBox>
 #include "main_window.h"
 #include "login_dialog.h"
 
-// 内嵌明亮主题样式（现代圆角、柔和配色）
+// 内嵌明亮主题样式
 static const char* kLightTheme = R"(
 QMainWindow, QDialog, QWidget { background-color: #f0f4f8; color: #333333; }
 QPushButton { background-color: #4A90D9; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 500; }
@@ -26,19 +27,17 @@ QTabWidget::pane { border: none; background: transparent; }
 QStatusBar { background-color: #ffffff; color: #666666; }
 )";
 
-// 设置一个支持中文的字体，按平台优先级尝试
 static void setupCjkFont() {
     const char* preferredFonts[] = {
-        "Microsoft YaHei",       // Windows 最常用
+        "Microsoft YaHei",
         "Microsoft YaHei UI",
         "SimHei",
-        "Noto Sans CJK SC",      // Linux 常见
+        "Noto Sans CJK SC",
         "Noto Sans Mono CJK SC",
         "WenQuanYi Micro Hei",
-        "PingFang SC",           // macOS
+        "PingFang SC",
         "Heiti SC"
     };
-
     for (const char* name : preferredFonts) {
         if (QFontDatabase::hasFamily(name)) {
             QFont font(name);
@@ -47,8 +46,6 @@ static void setupCjkFont() {
             return;
         }
     }
-
-    // 如果没有找到中文字体，使用系统默认字体但设置大字号以触发字体回退
     QFont font = QApplication::font();
     font.setPointSize(10);
     QApplication::setFont(font);
@@ -62,30 +59,62 @@ int main(int argc, char* argv[]) {
     setupCjkFont();
     app.setStyleSheet(kLightTheme);
 
-    // 先创建主窗口（初始隐藏）
+    // 创建主窗口（初始隐藏）
     MainWindow main_window;
     main_window.setWindowTitle("WeMeet — 企业级视频会议");
     main_window.resize(1200, 800);
 
-    // 显示登录对话框（独立窗口）
+    // 登录对话框（只采集凭据，网络认证由 MainWindow 通过 NetworkClient 完成）
     LoginDialog login_dialog;
     login_dialog.setWindowTitle("WeMeet — 登录");
 
-    QObject::connect(&login_dialog, &LoginDialog::login_success,
+    QObject::connect(&login_dialog, &LoginDialog::login_request,
+                     [&main_window, &login_dialog](const QString& email, const QString& password) {
+        // 主窗口负责向服务器发送 LOGIN_REQ 并接收响应
+        main_window.login_via_server(email, password);
+        // 主窗口认证成功后会自动回调 on_login_success 并关闭此对话框
+    });
+
+    QObject::connect(&login_dialog, &LoginDialog::register_request,
+                     [&main_window](const QString& email, const QString& password, const QString& nickname) {
+        // 主窗口负责向服务器发送 REGISTER_REQ 并接收响应
+        main_window.register_via_server(email, password, nickname);
+    });
+
+    // 主窗口认证成功的信号 -> 关闭登录对话框
+    QObject::connect(&main_window, &MainWindow::auth_success,
                      [&main_window, &login_dialog](uint64_t user_id, const QString& nickname) {
+        login_dialog.hide();
         main_window.on_login_success(user_id, nickname);
         main_window.show();
         main_window.raise();
         main_window.activateWindow();
-        // 关闭登录对话框（accept 返回 DialogCode::Accepted）
         login_dialog.accept();
     });
 
-    if (login_dialog.exec() == QDialog::Accepted) {
-        // 登录成功，进入主事件循环
-        return app.exec();
+    // 主窗口认证失败的信号 -> 显示错误
+    QObject::connect(&main_window, &MainWindow::auth_failed,
+                     [&login_dialog](const QString& error_msg) {
+        login_dialog.show_error(error_msg);
+    });
+
+    // 主窗口注册响应的信号 -> 显示消息
+    QObject::connect(&main_window, &MainWindow::register_result,
+                     [&login_dialog](bool success, const QString& msg) {
+        login_dialog.show_register_result(success, msg);
+    });
+
+    // 先连接服务器
+    if (!main_window.connect_to_server()) {
+        QMessageBox::critical(nullptr, "连接失败",
+            "无法连接到信令服务器，请确认服务端已启动。\n\n"
+            "服务器地址: " + main_window.server_host() + ":" +
+            QString::number(main_window.server_port()));
+        return 1;
     }
 
-    // 用户取消登录
+    if (login_dialog.exec() == QDialog::Accepted) {
+        return app.exec();
+    }
     return 0;
 }

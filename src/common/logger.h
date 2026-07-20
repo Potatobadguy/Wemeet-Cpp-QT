@@ -70,6 +70,7 @@ private:
     Buffer                  buffers_[2];
     int                     current_buffer_ = 0;        // 当前写入缓冲
     std::mutex              mutex_;
+    std::mutex              file_mutex_;                 // 立即写入文件用的独立锁
     std::condition_variable cv_;
     std::thread             flush_thread_;
     std::ofstream           file_stream_;

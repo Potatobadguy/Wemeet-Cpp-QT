@@ -17,7 +17,7 @@
 
 namespace {
 
-// 辅助：序列化 Protobuf 子消息并包装为带 4 字节长度头的完整消息
+// 辅助：序列化 Protobuf 子消息为 BaseMessage（不添加长度头，长度头由 NetworkClient 添加）
 std::string encode_wrapped(int msg_type, uint64_t seq_id, const google::protobuf::Message& payload) {
     std::string payload_bytes;
     payload.SerializeToString(&payload_bytes);
@@ -28,19 +28,10 @@ std::string encode_wrapped(int msg_type, uint64_t seq_id, const google::protobuf
     base.set_timestamp_ms(QDateTime::currentMSecsSinceEpoch());
     base.set_payload(payload_bytes);
 
+    // 直接返回 BaseMessage 的序列化结果，4 字节长度头由 NetworkClient::send_message 添加
     std::string base_bytes;
     base.SerializeToString(&base_bytes);
-
-    // 4 字节大端长度头 + body
-    uint32_t len = static_cast<uint32_t>(base_bytes.size());
-    std::string out;
-    out.resize(4 + len);
-    out[0] = static_cast<char>((len >> 24) & 0xFF);
-    out[1] = static_cast<char>((len >> 16) & 0xFF);
-    out[2] = static_cast<char>((len >> 8) & 0xFF);
-    out[3] = static_cast<char>(len & 0xFF);
-    std::memcpy(&out[4], base_bytes.data(), len);
-    return out;
+    return base_bytes;
 }
 
 } // namespace
@@ -110,12 +101,12 @@ void MainWindow::setup_ui() {
         "QPushButton { color: white; padding: 14px 36px; "
         "border-radius: 10px; font-size: 15px; font-weight: bold; min-width: 200px; }";
 
-    create_meeting_btn_ = new QPushButton("📅 创建会议");
+    create_meeting_btn_ = new QPushButton("[+] 创建会议");
     create_meeting_btn_->setStyleSheet(
         btn_style + "QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
         "stop:0 #4A90D9, stop:1 #357ABD); }");
 
-    auto* join_meeting_btn = new QPushButton("🔗 加入会议");
+    auto* join_meeting_btn = new QPushButton("[->] 加入会议");
     join_meeting_btn->setStyleSheet(
         btn_style + "QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
         "stop:0 #50C878, stop:1 #3DA85C); }");
@@ -167,7 +158,7 @@ void MainWindow::setup_navigation() {
     nav_layout->setContentsMargins(12, 8, 12, 8);
     nav_layout->setSpacing(12);
 
-    back_btn_ = new QPushButton("←  返回");
+    back_btn_ = new QPushButton("<-  返回");
     back_btn_->setCursor(Qt::PointingHandCursor);
     back_btn_->setStyleSheet(
         "QPushButton { background: transparent; color: #4A90D9; "
@@ -238,10 +229,85 @@ void MainWindow::on_back_requested() {
 
 // ── 服务器连接 ─────────────────────────────────────────────
 
-void MainWindow::connect_to_server() {
-    if (network_->is_connected()) return;
-    statusBar()->showMessage(QString("正在连接 %1:%2...").arg(server_host_).arg(server_port_), 2000);
+bool MainWindow::connect_to_server() {
+    if (network_->is_connected()) return true;
+    qDebug("MainWindow: connecting to %s:%u...", qPrintable(server_host_), server_port_);
     network_->connect_to_server(server_host_, server_port_);
+
+    // 等待连接成功（最多 5 秒，非阻塞事件循环）
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(network_, &NetworkClient::connected, &loop, &QEventLoop::quit);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(5000);
+    loop.exec();
+
+    bool ok = network_->is_connected();
+    if (ok) {
+        qDebug("MainWindow: connected OK");
+    } else {
+        qWarning("MainWindow: connect timeout");
+    }
+    return ok;
+}
+
+void MainWindow::login_via_server(const QString& email, const QString& password) {
+    if (!network_->is_connected()) {
+        emit auth_failed("未连接到服务器，请重启客户端");
+        return;
+    }
+
+    // 标记等待登录响应
+    waiting_login_ = true;
+    login_success_ = false;
+
+    wemeet::LoginReq req;
+    req.set_email(email.toStdString());
+    req.set_password(password.toStdString());
+
+    network_->send_message(encode_wrapped(
+        static_cast<int>(wemeet::MSG_LOGIN_REQ),
+        QDateTime::currentMSecsSinceEpoch(), req));
+
+    qDebug("MainWindow: LOGIN_REQ sent for %s", qPrintable(email));
+
+    // 启动超时定时器
+    QTimer::singleShot(8000, this, [this]() {
+        if (waiting_login_) {
+            waiting_login_ = false;
+            emit auth_failed("服务器验证超时（8秒）");
+        }
+    });
+}
+
+void MainWindow::register_via_server(const QString& email, const QString& password,
+                                     const QString& nickname) {
+    if (!network_->is_connected()) {
+        emit register_result(false, "未连接到服务器，请重启客户端");
+        return;
+    }
+
+    waiting_register_ = true;
+
+    wemeet::RegisterReq req;
+    req.set_email(email.toStdString());
+    req.set_password(password.toStdString());
+    req.set_nickname(nickname.toStdString());
+
+    network_->send_message(encode_wrapped(
+        static_cast<int>(wemeet::MSG_REGISTER_REQ),
+        QDateTime::currentMSecsSinceEpoch(), req));
+
+    qDebug("MainWindow: REGISTER_REQ sent for %s", qPrintable(email));
+
+    // 启动超时定时器
+    QTimer::singleShot(8000, this, [this]() {
+        if (waiting_register_) {
+            waiting_register_ = false;
+            emit register_result(false, "服务器无响应（8秒）");
+        }
+    });
 }
 
 void MainWindow::on_network_connected() {
@@ -249,18 +315,9 @@ void MainWindow::on_network_connected() {
     server_status_label_->setStyleSheet(
         "color: #50C878; font-size: 12px; padding: 4px 8px; "
         "background: rgba(80,200,120,0.15); border-radius: 10px;");
-    statusBar()->showMessage("✓ 已连接到信令服务器", 2000);
+    statusBar()->showMessage("OK 已连接到信令服务器", 2000);
 
-    // 免密码认证：通知服务器本用户的 user_id → conn_id 映射
-    if (current_user_id_ > 0) {
-        wemeet::AuthByIdReq req;
-        req.set_user_id(current_user_id_);
-        req.set_nickname(current_nickname_.toStdString());
-        network_->send_message(encode_wrapped(
-            static_cast<int>(wemeet::MSG_AUTH_BY_ID_REQ),
-            QDateTime::currentMSecsSinceEpoch(), req));
-        qDebug("AuthById sent: user=%llu", current_user_id_);
-    }
+    // AuthById 现在在 LOGIN_RESP 成功后发送
 }
 
 void MainWindow::on_network_disconnected() {
@@ -268,7 +325,7 @@ void MainWindow::on_network_disconnected() {
     server_status_label_->setStyleSheet(
         "color: #E74C3C; font-size: 12px; padding: 4px 8px; "
         "background: rgba(231,76,60,0.15); border-radius: 10px;");
-    statusBar()->showMessage("✗ 与服务器连接断开", 3000);
+    statusBar()->showMessage("X 与服务器连接断开", 3000);
 }
 
 void MainWindow::on_network_error(const QString& err) {
@@ -278,6 +335,7 @@ void MainWindow::on_network_error(const QString& err) {
 // ── 网络消息处理 ───────────────────────────────────────────
 
 void MainWindow::on_network_message(const std::string& data) {
+    qDebug("MainWindow: on_network_message called, data size=%zu", data.size());
     process_incoming_message(data);
 }
 
@@ -289,11 +347,69 @@ void MainWindow::process_incoming_message(const std::string& data) {
         return;
     }
 
+    qDebug("MainWindow: received message type=%d payload=%zu B, waiting_login_=%d",
+           static_cast<int>(base.type()), base.payload().size(), waiting_login_);
+
     switch (base.type()) {
     case wemeet::MSG_AUTH_BY_ID_RESP: {
         wemeet::AuthByIdResp resp;
         if (resp.ParseFromString(base.payload()) && resp.success()) {
             qDebug("AuthById succeeded for user=%llu", resp.user_id());
+        }
+        break;
+    }
+    case wemeet::MSG_LOGIN_RESP: {
+        wemeet::LoginResp resp;
+        if (resp.ParseFromString(base.payload()) && waiting_login_) {
+            waiting_login_ = false;
+            if (resp.success()) {
+                login_success_ = true;
+                qDebug("LOGIN_RESP success: uid=%llu nick=%s",
+                       resp.user_id(), resp.nickname().c_str());
+                emit auth_success(resp.user_id(),
+                                  QString::fromStdString(resp.nickname()));
+                // 向服务器注册 user->conn 映射（AuthById）
+                wemeet::AuthByIdReq areq;
+                areq.set_user_id(resp.user_id());
+                areq.set_nickname(resp.nickname());
+                network_->send_message(encode_wrapped(
+                    static_cast<int>(wemeet::MSG_AUTH_BY_ID_REQ),
+                    0, areq));
+            } else {
+                QString err = QString::fromStdString(resp.error_msg().empty()
+                    ? "邮箱或密码错误" : resp.error_msg());
+                qDebug("LOGIN_RESP failed: %s", qPrintable(err));
+                emit auth_failed(err);
+            }
+        } else if (!waiting_login_) {
+            qWarning("MainWindow: received LOGIN_RESP but not waiting (dropped)");
+        } else {
+            qWarning("MainWindow: failed to parse LOGIN_RESP payload");
+        }
+        break;
+    }
+    case wemeet::MSG_REGISTER_RESP: {
+        wemeet::RegisterResp resp;
+        if (resp.ParseFromString(base.payload()) && waiting_register_) {
+            waiting_register_ = false;
+            QString err = QString::fromStdString(resp.error_msg());
+            if (resp.success()) {
+                qDebug("REGISTER_RESP success: uid=%llu", resp.user_id());
+                emit register_result(true, "注册成功！用户ID: " +
+                                     QString::number(resp.user_id()));
+                // 注册成功后自动登录
+                QString email = QString::fromStdString(err.isEmpty() ? "" : "");
+                // err 在成功时为空，所以直接从最近一次的注册请求中获取
+                // 这里简单实现：通知用户去登录
+            } else {
+                qDebug("REGISTER_RESP failed: %s", qPrintable(err));
+                if (err.isEmpty()) err = "注册失败";
+                emit register_result(false, err);
+            }
+        } else if (!waiting_register_) {
+            qWarning("MainWindow: received REGISTER_RESP but not waiting (dropped)");
+        } else {
+            qWarning("MainWindow: failed to parse REGISTER_RESP payload");
         }
         break;
     }
@@ -305,7 +421,7 @@ void MainWindow::process_incoming_message(const std::string& data) {
 
             // 弹窗显示服务器分配的房间号
             QMessageBox msgBox(this);
-            msgBox.setWindowTitle("📅 会议已创建");
+            msgBox.setWindowTitle("[+] 会议已创建");
             msgBox.setIcon(QMessageBox::Information);
             msgBox.setText("服务器已为分配会议号");
             msgBox.setInformativeText(
@@ -359,14 +475,14 @@ void MainWindow::process_incoming_message(const std::string& data) {
                     if (!is_self) {
                         meeting_page_->append_chat_message(
                             0, "[系统]",
-                            QString("🟢 %1 已在会议中").arg(QString::fromStdString(p.nickname())));
+                            QString("* %1 已在会议中").arg(QString::fromStdString(p.nickname())));
                     }
                 }
 
                 // 自己加入成功的系统提示
                 meeting_page_->append_chat_message(
                     0, "[系统]",
-                    QString("✅ 您已加入会议 (共 %1 人)").arg(resp.participants_size()));
+                    QString("OK 您已加入会议 (共 %1 人)").arg(resp.participants_size()));
             } else {
                 statusBar()->showMessage("加入失败: " +
                     QString::fromStdString(resp.error_msg()), 5000);
@@ -393,7 +509,7 @@ void MainWindow::process_incoming_message(const std::string& data) {
                 if (uid != current_user_id_) {
                     meeting_page_->append_chat_message(
                         0, "[系统]",
-                        QString("🟢 %1 加入了会议").arg(nick));
+                        QString("* %1 加入了会议").arg(nick));
                 }
                 break;
             case wemeet::ParticipantUpdate::LEFT:
@@ -401,7 +517,7 @@ void MainWindow::process_incoming_message(const std::string& data) {
                 statusBar()->showMessage(QString("%1 离开了会议").arg(nick), 3000);
                 meeting_page_->append_chat_message(
                     0, "[系统]",
-                    QString("🔴 %1 离开了会议").arg(nick));
+                    QString("* %1 离开了会议").arg(nick));
                 break;
             case wemeet::ParticipantUpdate::UPDATED:
                 meeting_page_->update_participant(uid, p.audio_on(), p.video_on());
@@ -416,6 +532,22 @@ void MainWindow::process_incoming_message(const std::string& data) {
             meeting_page_->append_chat_message(
                 msg.user_id(), QString::fromStdString(msg.nickname()),
                 QString::fromStdString(msg.content()));
+        }
+        break;
+    }
+    case wemeet::MSG_MEDIA_RELAY_REGISTER_RESP: {
+        // 收到中继注册响应，保存其他参与者的 SSRC
+        wemeet::MediaRelayRegisterResp resp;
+        if (resp.ParseFromString(base.payload())) {
+            qDebug("MainWindow: MediaRelay registered, ssrc=%u, peers=%d",
+                   resp.ssrc(), resp.peers_size());
+            if (media_engine_) {
+                for (const auto& peer : resp.peers()) {
+                    if (peer.user_id() != current_user_id_) {
+                        media_engine_->set_peer_ssrc(peer.user_id(), peer.ssrc());
+                    }
+                }
+            }
         }
         break;
     }
@@ -567,7 +699,7 @@ void MainWindow::on_network_quality_changed(int32_t quality) {
     case 1: text = "网络: 极差"; break;
     default: text = "网络: 未知"; break;
     }
-    statusBar()->showMessage("📶 " + text, 2000);
+    statusBar()->showMessage("NET " + text, 2000);
 }
 
 void MainWindow::init_media_engine(uint64_t user_id, const QString& room_id,
@@ -580,4 +712,30 @@ void MainWindow::init_media_engine(uint64_t user_id, const QString& room_id,
     media_engine_->start_microphone();   // 麦克风通常可共享
     // 摄像头由 MediaEngine 内部自动尝试（独占时会失败并显示占位）
     media_engine_->start_camera();
+
+    // 向服务器注册媒体中继（让服务器知道我们的 UDP 地址）
+    // 视频
+    {
+        wemeet::MediaRelayRegister vreq;
+        vreq.set_user_id(user_id);
+        vreq.set_room_id(room_id.toStdString());
+        vreq.set_relay_host(server_host_.toStdString());
+        vreq.set_relay_port(media_engine_->local_video_port());
+        vreq.set_media_type("video");
+        network_->send_message(encode_wrapped(
+            static_cast<int>(wemeet::MSG_MEDIA_RELAY_REGISTER),
+            QDateTime::currentMSecsSinceEpoch(), vreq));
+    }
+    // 音频
+    {
+        wemeet::MediaRelayRegister areq;
+        areq.set_user_id(user_id);
+        areq.set_room_id(room_id.toStdString());
+        areq.set_relay_host(server_host_.toStdString());
+        areq.set_relay_port(media_engine_->local_audio_port());
+        areq.set_media_type("audio");
+        network_->send_message(encode_wrapped(
+            static_cast<int>(wemeet::MSG_MEDIA_RELAY_REGISTER),
+            QDateTime::currentMSecsSinceEpoch(), areq));
+    }
 }

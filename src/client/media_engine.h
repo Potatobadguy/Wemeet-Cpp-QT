@@ -14,6 +14,7 @@
 #include <QByteArray>
 #include <QVideoWidget>
 #include <QElapsedTimer>
+#include <unordered_map>
 #include <QMutex>
 #include <QQueue>
 #include <QTimer>
@@ -107,6 +108,9 @@ public:
     // ── 传输 ─────────────────────────────────────────────
     void set_relay_server(const QHostAddress& host, uint16_t video_port, uint16_t audio_port);
     void set_ssrc(uint32_t video_ssrc, uint32_t audio_ssrc);
+    uint16_t local_video_port() const;
+    uint16_t local_audio_port() const;
+    void set_peer_ssrc(uint64_t user_id, uint32_t ssrc);
 
     // ── 控制 ─────────────────────────────────────────────
     void mute_audio(bool mute);
@@ -202,6 +206,20 @@ private:
         uint32_t ssrc;
     };
     std::vector<RemoteStream> remote_streams_;
+
+    // 等待 widget 创建的 peer SSRC 映射
+    std::unordered_map<uint64_t, uint32_t> pending_peer_ssrc_;
+
+    // ── 帧重组缓冲（按 SSRC 缓存 JPEG 帧分片）────────────
+    struct FrameAssembler {
+        uint32_t        ssrc      = 0;
+        uint32_t        timestamp = 0;
+        QByteArray      jpeg_data;
+        uint16_t        expected_next_seq = 0;
+        bool            active    = false;
+        QElapsedTimer   last_update;
+    };
+    std::unordered_map<uint32_t, FrameAssembler> frame_assemblers_;
 
     // ── 统计定时器 ───────────────────────────────────────
     QTimer* stats_timer_ = nullptr;

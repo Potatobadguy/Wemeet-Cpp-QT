@@ -494,10 +494,17 @@ RemoteVideoWidget* MediaEngine::create_remote_video_widget(uint64_t user_id, QWi
 
     RemoteStream rs;
     rs.user_id = user_id;
+    // 如果之前已有该用户的 SSRC，立即应用
+    auto it = pending_peer_ssrc_.find(user_id);
+    if (it != pending_peer_ssrc_.end()) {
+        rs.ssrc = it->second;
+        pending_peer_ssrc_.erase(it);
+    }
     rs.widget = std::make_unique<RemoteVideoWidget>(parent);
     remote_streams_.push_back(std::move(rs));
 
-    qDebug("MediaEngine: created remote video widget for user=%llu", user_id);
+    qDebug("MediaEngine: created remote video widget for user=%llu, ssrc=%u",
+           user_id, rs.ssrc);
     return remote_streams_.back().widget.get();
 }
 
@@ -557,6 +564,27 @@ int32_t MediaEngine::network_quality() const {
     return bandwidth_estimator_->network_quality();
 }
 
+uint16_t MediaEngine::local_video_port() const {
+    return rtp_session_ ? rtp_session_->local_port() : 0;
+}
+
+uint16_t MediaEngine::local_audio_port() const {
+    return rtp_session_ ? rtp_session_->local_port() : 0;
+}
+
+void MediaEngine::set_peer_ssrc(uint64_t user_id, uint32_t ssrc) {
+    for (auto& rs : remote_streams_) {
+        if (rs.user_id == user_id) {
+            rs.ssrc = ssrc;
+            qDebug("MediaEngine: set peer user=%llu ssrc=%u", user_id, ssrc);
+            return;
+        }
+    }
+    // Widget 还没创建时，记录到待映射表
+    pending_peer_ssrc_[user_id] = ssrc;
+    qDebug("MediaEngine: queued peer ssrc for user=%llu ssrc=%u", user_id, ssrc);
+}
+
 RtpSession::Stats MediaEngine::get_stats() const {
     return rtp_session_->stats();
 }
@@ -567,31 +595,72 @@ void MediaEngine::register_media_relay(const QString& relay_host, uint16_t relay
 
 void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                                           const QHostAddress& /*src*/, uint16_t /*port*/) {
-    // 放入抖动缓冲
+    // 放入抖动缓冲（保留重排序与丢包统计）
     jitter_buffer_->push_packet(packet);
 
-    // 尝试取出已排好序的包
-    RTPPacket ordered;
-    while (jitter_buffer_->pop_packet(ordered)) {
-        uint8_t pt = ordered.payload_type();
-        if (pt > 96) {
-            // 视频包 — 查找对应远端控件
-            for (auto& rs : remote_streams_) {
-                if (rs.ssrc == ordered.ssrc() || rs.ssrc == 0) {
-                    QVideoFrame frame;
-                    // 简化：实际应解码视频帧
-                    // 这里我们模拟帧到达
-                    QImage img(320, 240, QImage::Format_ARGB32);
-                    img.fill(QColor(30, 40, 60));
-                    QVideoFrame frame_from_img(img);
-                    rs.widget->present_frame(frame_from_img);
-                    break;
+    uint8_t pt = packet.payload_type();
+    uint16_t seq = packet.sequence();
+    uint32_t ts  = packet.timestamp_val();
+    uint32_t ssrc = packet.ssrc();
+    bool marker = packet.marker();
+
+    if (pt > 96) {
+        // ── 视频包：按 SSRC+timestamp 组装 JPEG 帧 ──
+        auto it = frame_assemblers_.find(ssrc);
+        if (it == frame_assemblers_.end() || !it->second.active ||
+            it->second.timestamp != ts) {
+            // 新帧开始
+            FrameAssembler fa;
+            fa.ssrc = ssrc;
+            fa.timestamp = ts;
+            fa.jpeg_data.reserve(64 * 1024);
+            fa.jpeg_data = packet.payload;
+            fa.expected_next_seq = static_cast<uint16_t>(seq + 1);
+            fa.active = true;
+            fa.last_update.start();
+            frame_assemblers_[ssrc] = std::move(fa);
+        } else {
+            // 追加分片
+            it->second.jpeg_data.append(packet.payload);
+            it->second.expected_next_seq = static_cast<uint16_t>(seq + 1);
+            it->second.last_update.restart();
+        }
+
+        // 标记位 = 1 表示这是该帧的最后一个分片
+        if (marker) {
+            auto fa_it = frame_assemblers_.find(ssrc);
+            if (fa_it != frame_assemblers_.end()) {
+                QByteArray jpeg = fa_it->second.jpeg_data;
+                frame_assemblers_.erase(fa_it);
+
+                // 用 QImage::loadFromData 解码 JPEG
+                QImage img;
+                if (img.loadFromData(jpeg, "JPEG") && !img.isNull()) {
+                    QVideoFrame frame(img);
+                    // 找到对应的远端 widget
+                    for (auto& rs : remote_streams_) {
+                        if (rs.ssrc == ssrc || rs.ssrc == 0) {
+                            if (rs.ssrc == 0) rs.ssrc = ssrc;  // 记录
+                            rs.widget->present_frame(frame);
+                            emit remote_video_frame(rs.user_id, frame);
+                            break;
+                        }
+                    }
                 }
             }
-        } else {
-            // 音频包 — 简化处理
-            emit remote_audio_data(ordered.payload);
         }
+
+        // 清理超时的重组缓冲（超过 1 秒未完成）
+        for (auto it = frame_assemblers_.begin(); it != frame_assemblers_.end(); ) {
+            if (it->second.last_update.elapsed() > 1000) {
+                it = frame_assemblers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        // 音频包 — 透传（音频仍可后续扩展解码）
+        emit remote_audio_data(packet.payload);
     }
 }
 

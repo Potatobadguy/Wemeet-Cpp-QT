@@ -28,9 +28,22 @@ TcpServer::~TcpServer() {
 }
 
 void TcpServer::start() {
-    // 监听 accept 事件
-    LOG_INFO("TcpServer starting on %s:%u", ip_.c_str(), port_);
-    // accept 回调由直接轮询或集成到主循环
+    // EventLoop 的 add_read_event 不存储回调，
+    // 改用定时轮询（50ms间隔）检查新连接
+    main_loop_->run_every(50, [this]() {
+        int count = 0;
+        while (true) {
+            sockaddr_in peer_addr;
+            Socket conn_sock = listen_sock_.accept(&peer_addr);
+            if (!conn_sock.valid()) break;
+            count++;
+            handle_accept(std::move(conn_sock), peer_addr);
+        }
+        if (count > 0) {
+            LOG_INFO("Accept loop: accepted %d new connection(s) this tick", count);
+        }
+    });
+    LOG_INFO("TcpServer starting on %s:%u, fd=%d", ip_.c_str(), port_, listen_sock_.fd());
 }
 
 void TcpServer::stop() {
@@ -39,18 +52,15 @@ void TcpServer::stop() {
 }
 
 // ── accept 新连接 ────────────────────────────────────────
-void TcpServer::handle_accept() {
-    sockaddr_in peer_addr;
-    Socket conn_sock = listen_sock_.accept(&peer_addr);
-
+void TcpServer::handle_accept(Socket conn_sock, const sockaddr_in& peer_addr) {
     if (!conn_sock.valid()) return;
 
     uint64_t conn_id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
 
     char ip_buf[INET_ADDRSTRLEN];
     ::inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buf, sizeof(ip_buf));
-    LOG_DEBUG("New connection: conn_id=%lu, ip=%s:%d",
-              conn_id, ip_buf, ntohs(peer_addr.sin_port));
+    LOG_INFO("New connection: conn_id=%lu, ip=%s:%d",
+             conn_id, ip_buf, ntohs(peer_addr.sin_port));
 
     // 分发到子 Reactor（轮询）
     EventLoop* io_loop = pool_->next_loop();

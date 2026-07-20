@@ -92,7 +92,11 @@ void NetworkClient::on_disconnected() {
 }
 
 void NetworkClient::on_ready_read() {
-    recv_buffer_.append(socket_->readAll());
+    QByteArray incoming = socket_->readAll();
+    if (incoming.size() > 0) {
+        qDebug("NetworkClient: RECV %d bytes from server (raw)", incoming.size());
+    }
+    recv_buffer_.append(incoming);
 
     // 处理粘包: 4字节长度头
     while (recv_buffer_.size() >= 4) {
@@ -111,6 +115,7 @@ void NetworkClient::on_ready_read() {
         QByteArray body = recv_buffer_.mid(4, body_len);
         recv_buffer_.remove(0, 4 + body_len);
 
+        qDebug("NetworkClient: emitting message_received (%d B body)", body.size());
         emit message_received(body.toStdString());
     }
 }

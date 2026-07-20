@@ -3,40 +3,7 @@
 #include <QFormLayout>
 #include <QVBoxLayout>
 #include <QFrame>
-#include <QtEndian>
-
-// Protobuf 消息
-#include "common.pb.h"
-#include "auth.pb.h"
-
-// ── 辅助：序列化 BaseMessage + 4 字节长度头 ─────────────────
-
-static QByteArray pack_message(int msg_type, uint64_t seq_id,
-                                const google::protobuf::Message& payload) {
-    std::string payload_bytes;
-    payload.SerializeToString(&payload_bytes);
-
-    wemeet::BaseMessage base;
-    base.set_type(static_cast<wemeet::MsgType>(msg_type));
-    base.set_sequence_id(seq_id);
-    base.set_timestamp_ms(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    base.set_payload(payload_bytes);
-
-    std::string base_bytes;
-    base.SerializeToString(&base_bytes);
-
-    uint32_t len = static_cast<uint32_t>(base_bytes.size());
-    QByteArray out;
-    out.resize(4 + len);
-    uint32_t net_len = qToBigEndian(len);
-    std::memcpy(out.data(), &net_len, 4);
-    std::memcpy(out.data() + 4, base_bytes.data(), len);
-    return out;
-}
-
-// ── 构造 ─────────────────────────────────────────────────────
+#include <QSpacerItem>
 
 LoginDialog::LoginDialog(QWidget* parent)
     : QDialog(parent) {
@@ -44,23 +11,9 @@ LoginDialog::LoginDialog(QWidget* parent)
     setWindowTitle("WeMeet — 登录");
     setWindowFlags(Qt::FramelessWindowHint);
     setFixedWidth(640);
-    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     setAttribute(Qt::WA_TranslucentBackground);
     setStyleSheet("QDialog { background: transparent; border: none; }");
 
-    // 网络
-    sock_ = new QTcpSocket(this);
-    recv_buf_.reserve(65536);
-    connect(sock_, &QTcpSocket::connected, this, &LoginDialog::on_socket_connected);
-    connect(sock_, &QTcpSocket::readyRead, this, &LoginDialog::on_socket_ready_read);
-    connect(sock_, &QTcpSocket::errorOccurred, this, &LoginDialog::on_socket_error);
-
-    // 超时定时器
-    timeout_timer_ = new QTimer(this);
-    timeout_timer_->setSingleShot(true);
-    connect(timeout_timer_, &QTimer::timeout, this, &LoginDialog::on_login_timeout);
-
-    // ── UI ───────────────────────────────────────────────
     auto* main_layout = new QVBoxLayout(this);
     main_layout->setContentsMargins(0, 0, 0, 0);
     main_layout->setSpacing(0);
@@ -68,63 +21,73 @@ LoginDialog::LoginDialog(QWidget* parent)
     auto* card = new QFrame(this);
     card->setObjectName("loginCard");
     card->setStyleSheet(
-        "QFrame#loginCard {"
-        "  background: white;"
-        "  border-radius: 24px;"
-        "  border: 1px solid #e8edf5;"
-        "}"
+        "QFrame#loginCard { background: white; border-radius: 24px; border: 1px solid #e8edf5; }"
         "QLabel { background: transparent; }");
 
     auto* card_layout = new QVBoxLayout(card);
-    card_layout->setContentsMargins(48, 0, 48, 44);
+    card_layout->setContentsMargins(48, 8, 48, 44);
     card_layout->setSpacing(0);
 
+    // ── 标题栏（可拖动 + 关闭按钮）─────────────────────
     auto* title_bar = new QWidget(this);
+    title_bar->setFixedHeight(40);
     title_bar_ = title_bar;
     auto* title_layout = new QHBoxLayout(title_bar);
-    title_layout->setContentsMargins(0, 12, 0, 12);
+    title_layout->setContentsMargins(0, 4, 0, 4);
+    title_layout->setSpacing(0);
 
     auto* title_label = new QLabel("WeMeet");
-    title_label->setStyleSheet("QLabel { color: #4A90D9; font-size: 14px; font-weight: bold; }");
+    title_label->setStyleSheet(
+        "QLabel { color: #4A90D9; font-size: 14px; font-weight: bold; "
+        "background: transparent; }");
 
-    auto* close_btn = new QPushButton("×");
-    close_btn->setFixedSize(32, 32);
+    auto* close_btn = new QPushButton("\u00D7");  // × 关闭按钮
+    close_btn->setFixedSize(36, 36);
+    close_btn->setCursor(Qt::PointingHandCursor);
     close_btn->setStyleSheet(
         "QPushButton { background: transparent; color: #8896a6; "
-        "border: none; border-radius: 16px; font-size: 20px; font-weight: bold; }"
-        "QPushButton:hover { background: #f0f0f0; color: #333333; }");
+        "border: none; border-radius: 18px; font-size: 22px; font-weight: 300; }"
+        "QPushButton:hover { background: #f0f0f0; color: #333333; }"
+        "QPushButton:pressed { background: #e0e0e0; color: #333333; }");
+    close_btn->setToolTip("关闭");
+    close_btn_ = close_btn;
 
     title_layout->addWidget(title_label);
     title_layout->addStretch();
     title_layout->addWidget(close_btn);
-    card_layout->addWidget(title_bar);
 
+    card_layout->addWidget(title_bar);
     connect(close_btn, &QPushButton::clicked, this, &LoginDialog::on_close_clicked);
 
+    // 让整个标题栏可拖动
     title_bar->setMouseTracking(true);
     title_bar->installEventFilter(this);
+    close_btn->installEventFilter(this);
 
+    // ── Logo ────────────────────────────────────────
     auto* logo = new QLabel("WeMeet");
-    logo->setStyleSheet("QLabel { color: #4A90D9; font-size: 42px; font-weight: bold; }");
+    logo->setStyleSheet("QLabel { color: #4A90D9; font-size: 42px; font-weight: bold; "
+                         "background: transparent; }");
     logo->setAlignment(Qt::AlignCenter);
     card_layout->addWidget(logo);
     card_layout->addSpacing(8);
 
     auto* subtitle = new QLabel("企业级视频会议");
-    subtitle->setStyleSheet("QLabel { color: #8896a6; font-size: 16px; }");
+    subtitle->setStyleSheet("QLabel { color: #8896a6; font-size: 16px; "
+                            "background: transparent; }");
     subtitle->setAlignment(Qt::AlignCenter);
     card_layout->addWidget(subtitle);
-    card_layout->addSpacing(36);
+    card_layout->addSpacing(24);
 
+    // ── 标签页 ──────────────────────────────────────
     auto* tabs = new QTabWidget(this);
     tabs->setDocumentMode(true);
     tabs->setStyleSheet(
         "QTabWidget::pane { border: none; background: transparent; padding: 0px; margin: 0px; }"
-        "QTabBar::tab { padding: 12px 60px; font-size: 16px; "
-        "color: #8896a6; background: transparent; border: none; }"
+        "QTabBar::tab { padding: 12px 60px; font-size: 16px; color: #8896a6; "
+        "background: transparent; border: none; }"
         "QTabBar::tab:selected { color: #4A90D9; border-bottom: 2px solid #4A90D9; }"
-        "QTabBar::tab:!selected { border-bottom: 2px solid transparent; }"
-        "QTabWidget::tab-bar { background: transparent; }");
+        "QTabBar::tab:!selected { border-bottom: 2px solid transparent; }");
 
     auto* login_tab = new QWidget();
     setup_login_tab(login_tab);
@@ -138,20 +101,12 @@ LoginDialog::LoginDialog(QWidget* parent)
     main_layout->addWidget(card);
 }
 
-void LoginDialog::set_server(const QString& host, uint16_t port) {
-    server_host_ = host;
-    server_port_ = port;
-}
-
-// ── UI 构建 ─────────────────────────────────────────────────
-
 void LoginDialog::setup_login_tab(QWidget* tab) {
     auto* layout = new QFormLayout(tab);
     layout->setSpacing(16);
     layout->setContentsMargins(0, 20, 0, 0);
-    layout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    layout->setLabelAlignment(Qt::AlignLeft);
 
-    QString label_style = "QLabel { color: #555555; font-size: 15px; }";
     QString input_style =
         "QLineEdit { padding: 14px; font-size: 15px; border: 1px solid #e0e0e0; "
         "border-radius: 12px; background: #f8f9fa; color: #333333; }"
@@ -159,7 +114,8 @@ void LoginDialog::setup_login_tab(QWidget* tab) {
         "QLineEdit::placeholder { color: #b0b0b0; }";
 
     auto* email_label = new QLabel("邮箱");
-    email_label->setStyleSheet(label_style);
+    email_label->setStyleSheet("QLabel { color: #555555; font-size: 15px; "
+                                "background: transparent; }");
     login_email_ = new QLineEdit();
     login_email_->setPlaceholderText("请输入邮箱");
     login_email_->setStyleSheet(input_style);
@@ -167,7 +123,8 @@ void LoginDialog::setup_login_tab(QWidget* tab) {
     layout->addRow(email_label, login_email_);
 
     auto* pass_label = new QLabel("密码");
-    pass_label->setStyleSheet(label_style);
+    pass_label->setStyleSheet("QLabel { color: #555555; font-size: 15px; "
+                              "background: transparent; }");
     login_pass_ = new QLineEdit();
     login_pass_->setPlaceholderText("请输入密码");
     login_pass_->setEchoMode(QLineEdit::Password);
@@ -175,332 +132,236 @@ void LoginDialog::setup_login_tab(QWidget* tab) {
     login_pass_->setMinimumHeight(46);
     layout->addRow(pass_label, login_pass_);
 
-    // 状态标签（连接中、错误提示）
     login_status_ = new QLabel("");
-    login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; }");
+    login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                 "background: transparent; }");
     login_status_->setAlignment(Qt::AlignCenter);
-    login_status_->hide();
+    login_status_->setMinimumHeight(20);
     layout->addRow(login_status_);
 
     login_btn_ = new QPushButton("登录");
+    login_btn_->setCursor(Qt::PointingHandCursor);
     login_btn_->setStyleSheet(
         "QPushButton { background: #4A90D9; color: white; padding: 14px; "
         "border-radius: 12px; font-size: 17px; font-weight: bold; margin-top: 14px; }"
         "QPushButton:hover { background: #357ABD; }"
-        "QPushButton:pressed { background: #2a6aa8; }");
+        "QPushButton:pressed { background: #2A5F9E; }"
+        "QPushButton:disabled { background: #a0c4e8; }");
     login_btn_->setMinimumHeight(50);
     layout->addRow(login_btn_);
 
     connect(login_btn_, &QPushButton::clicked, this, &LoginDialog::on_login_clicked);
-
-    // Enter 键触发登录
     connect(login_pass_, &QLineEdit::returnPressed, this, &LoginDialog::on_login_clicked);
 }
 
 void LoginDialog::setup_register_tab(QWidget* tab) {
     auto* layout = new QFormLayout(tab);
-    layout->setSpacing(16);
+    layout->setSpacing(12);
     layout->setContentsMargins(0, 20, 0, 0);
+    layout->setLabelAlignment(Qt::AlignLeft);
 
-    QString label_style = "QLabel { color: #555555; font-size: 15px; }";
     QString input_style =
-        "QLineEdit { padding: 14px; font-size: 15px; border: 1px solid #e0e0e0; "
-        "border-radius: 12px; background: #f8f9fa; color: #333333; }"
+        "QLineEdit { padding: 12px; font-size: 14px; border: 1px solid #e0e0e0; "
+        "border-radius: 10px; background: #f8f9fa; color: #333333; }"
         "QLineEdit:focus { border-color: #50C878; background: #ffffff; }"
         "QLineEdit::placeholder { color: #b0b0b0; }";
+
+    QString label_style = "QLabel { color: #555555; font-size: 14px; "
+                          "background: transparent; }";
 
     auto* email_label = new QLabel("邮箱");
     email_label->setStyleSheet(label_style);
     reg_email_ = new QLineEdit();
-    reg_email_->setPlaceholderText("请输入邮箱");
+    reg_email_->setPlaceholderText("请输入邮箱（将作为登录账号）");
     reg_email_->setStyleSheet(input_style);
-    reg_email_->setMinimumHeight(46);
+    reg_email_->setMinimumHeight(42);
     layout->addRow(email_label, reg_email_);
 
-    auto* nickname_label = new QLabel("昵称");
-    nickname_label->setStyleSheet(label_style);
+    auto* nick_label = new QLabel("昵称");
+    nick_label->setStyleSheet(label_style);
     reg_nickname_ = new QLineEdit();
-    reg_nickname_->setPlaceholderText("请输入昵称");
+    reg_nickname_->setPlaceholderText("请输入显示昵称（可选，留空使用邮箱前缀）");
     reg_nickname_->setStyleSheet(input_style);
-    reg_nickname_->setMinimumHeight(46);
-    layout->addRow(nickname_label, reg_nickname_);
+    reg_nickname_->setMinimumHeight(42);
+    layout->addRow(nick_label, reg_nickname_);
 
     auto* pass_label = new QLabel("密码");
     pass_label->setStyleSheet(label_style);
     reg_pass_ = new QLineEdit();
-    reg_pass_->setPlaceholderText("请输入密码（至少6位）");
+    reg_pass_->setPlaceholderText("请输入密码（至少 6 位）");
     reg_pass_->setEchoMode(QLineEdit::Password);
     reg_pass_->setStyleSheet(input_style);
-    reg_pass_->setMinimumHeight(46);
+    reg_pass_->setMinimumHeight(42);
     layout->addRow(pass_label, reg_pass_);
 
-    auto* confirm_label = new QLabel("确认密码");
-    confirm_label->setStyleSheet(label_style);
-    reg_confirm_pass_ = new QLineEdit();
-    reg_confirm_pass_->setPlaceholderText("请确认密码");
-    reg_confirm_pass_->setEchoMode(QLineEdit::Password);
-    reg_confirm_pass_->setStyleSheet(input_style);
-    reg_confirm_pass_->setMinimumHeight(46);
-    layout->addRow(confirm_label, reg_confirm_pass_);
+    auto* pass2_label = new QLabel("确认密码");
+    pass2_label->setStyleSheet(label_style);
+    reg_pass2_ = new QLineEdit();
+    reg_pass2_->setPlaceholderText("请再次输入密码");
+    reg_pass2_->setEchoMode(QLineEdit::Password);
+    reg_pass2_->setStyleSheet(input_style);
+    reg_pass2_->setMinimumHeight(42);
+    layout->addRow(pass2_label, reg_pass2_);
 
-    reg_btn_ = new QPushButton("注册");
+    reg_status_ = new QLabel("");
+    reg_status_->setStyleSheet("QLabel { color: #8896a6; font-size: 13px; "
+                               "background: transparent; }");
+    reg_status_->setAlignment(Qt::AlignCenter);
+    reg_status_->setMinimumHeight(20);
+    layout->addRow(reg_status_);
+
+    reg_btn_ = new QPushButton("立即注册");
+    reg_btn_->setCursor(Qt::PointingHandCursor);
     reg_btn_->setStyleSheet(
-        "QPushButton { background: #50C878; color: white; padding: 14px; "
-        "border-radius: 12px; font-size: 17px; font-weight: bold; margin-top: 14px; }"
-        "QPushButton:hover { background: #3DA85C; }"
-        "QPushButton:pressed { background: #2f8a4c; }");
-    reg_btn_->setMinimumHeight(50);
+        "QPushButton { background: #50C878; color: white; padding: 12px; "
+        "border-radius: 10px; font-size: 16px; font-weight: bold; margin-top: 10px; }"
+        "QPushButton:hover { background: #45B070; }"
+        "QPushButton:pressed { background: #3A9A60; }"
+        "QPushButton:disabled { background: #a8d8c0; }");
+    reg_btn_->setMinimumHeight(46);
+    reg_btn_->setEnabled(true);
     layout->addRow(reg_btn_);
 
     connect(reg_btn_, &QPushButton::clicked, this, &LoginDialog::on_register_clicked);
+    connect(reg_pass2_, &QLineEdit::returnPressed, this, &LoginDialog::on_register_clicked);
 }
-
-// ── 控件启用/禁用 ──────────────────────────────────────────
-
-void LoginDialog::set_controls_enabled(bool enabled) {
-    login_email_->setEnabled(enabled);
-    login_pass_->setEnabled(enabled);
-    login_btn_->setEnabled(enabled);
-    reg_email_->setEnabled(enabled);
-    reg_nickname_->setEnabled(enabled);
-    reg_pass_->setEnabled(enabled);
-    reg_confirm_pass_->setEnabled(enabled);
-    reg_btn_->setEnabled(enabled);
-}
-
-// ── 登录点击 ───────────────────────────────────────────────
 
 void LoginDialog::on_login_clicked() {
     QString email = login_email_->text().trimmed();
     QString pass  = login_pass_->text();
-
     if (email.isEmpty() || pass.isEmpty()) {
         login_status_->setText("请输入邮箱和密码");
+        login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                     "background: transparent; }");
         login_status_->show();
         return;
     }
-
-    // 禁用按钮，显示状态
-    set_controls_enabled(false);
+    login_btn_->setEnabled(false);
     login_btn_->setText("正在验证...");
-    login_status_->setText("正在连接服务器...");
-    login_status_->setStyleSheet("QLabel { color: #888; font-size: 13px; }");
+    login_status_->setText("正在验证...");
+    login_status_->setStyleSheet("QLabel { color: #888; font-size: 13px; "
+                                 "background: transparent; }");
     login_status_->show();
-    waiting_for_response_ = true;
 
-    // 连接到服务器
-    sock_->connectToHost(server_host_, server_port_);
-    timeout_timer_->start(8000); // 8 秒超时
+    // 发出信号，由 MainWindow 通过网络验证
+    emit login_request(email, pass);
 }
 
-void LoginDialog::send_login_request(const QString& email, const QString& password) {
-    wemeet::LoginReq req;
-    req.set_email(email.toStdString());
-    req.set_password(password.toStdString());
-
-    QByteArray packet = pack_message(
-        static_cast<int>(wemeet::MSG_LOGIN_REQ),
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count(),
-        req);
-
-    sock_->write(packet);
-    sock_->flush();
-    login_status_->setText("正在验证账号...");
+void LoginDialog::show_error(const QString& msg) {
+    login_btn_->setEnabled(true);
+    login_btn_->setText("登录");
+    login_status_->setText(msg);
+    login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                 "background: transparent; }");
+    login_status_->show();
 }
 
-// ── 注册点击 ───────────────────────────────────────────────
+void LoginDialog::show_register_result(bool success, const QString& msg) {
+    reg_btn_->setEnabled(true);
+    reg_btn_->setText("立即注册");
+    if (success) {
+        reg_status_->setText("\u2713 " + msg + " 正在为您登录...");
+        reg_status_->setStyleSheet("QLabel { color: #50C878; font-size: 13px; "
+                                   "background: transparent; }");
+        // 切换到登录标签页并填充邮箱
+        QList<QTabWidget*> tabs = findChildren<QTabWidget*>();
+        if (!tabs.isEmpty()) {
+            tabs[0]->setCurrentIndex(0);
+        }
+        if (reg_email_) {
+            login_email_->setText(reg_email_->text());
+        }
+        // 清空注册表单
+        reg_email_->clear();
+        reg_nickname_->clear();
+        reg_pass_->clear();
+        reg_pass2_->clear();
+    } else {
+        reg_status_->setText("\u2717 " + msg);
+        reg_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                   "background: transparent; }");
+    }
+}
 
 void LoginDialog::on_register_clicked() {
-    QString email    = reg_email_->text().trimmed();
-    QString nickname = reg_nickname_->text().trimmed();
-    QString pass     = reg_pass_->text();
-    QString confirm  = reg_confirm_pass_->text();
+    QString email = reg_email_->text().trimmed();
+    QString pass  = reg_pass_->text();
+    QString pass2 = reg_pass2_->text();
+    QString nick  = reg_nickname_->text().trimmed();
 
-    if (email.isEmpty() || nickname.isEmpty() || pass.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请填写所有字段");
-        return;
-    }
-    if (pass != confirm) {
-        QMessageBox::warning(this, "提示", "两次密码不一致");
+    // 校验
+    if (email.isEmpty()) {
+        reg_status_->setText("请输入邮箱");
+        reg_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                   "background: transparent; }");
         return;
     }
     if (pass.length() < 6) {
-        QMessageBox::warning(this, "提示", "密码至少6位");
+        reg_status_->setText("密码至少需要 6 位");
+        reg_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                   "background: transparent; }");
+        return;
+    }
+    if (pass != pass2) {
+        reg_status_->setText("两次输入的密码不一致");
+        reg_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                   "background: transparent; }");
         return;
     }
 
-    set_controls_enabled(false);
-    reg_btn_->setText("注册中...");
-    waiting_for_response_ = true;
-
-    sock_->connectToHost(server_host_, server_port_);
-    timeout_timer_->start(8000);
-}
-
-void LoginDialog::send_register_request(const QString& email, const QString& password,
-                                         const QString& nickname) {
-    wemeet::RegisterReq req;
-    req.set_email(email.toStdString());
-    req.set_password(password.toStdString());
-    req.set_nickname(nickname.toStdString());
-
-    QByteArray packet = pack_message(
-        static_cast<int>(wemeet::MSG_REGISTER_REQ),
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count(),
-        req);
-
-    sock_->write(packet);
-    sock_->flush();
-}
-
-// ── 网络事件 ───────────────────────────────────────────────
-
-void LoginDialog::on_socket_connected() {
-    if (!waiting_for_response_) return;
-
-    // 检测是登录还是注册（通过检查正在 disable 的是哪个按钮）
-    if (!login_btn_->isEnabled()) {
-        send_login_request(login_email_->text().trimmed(), login_pass_->text());
-    } else {
-        send_register_request(reg_email_->text().trimmed(),
-                               reg_pass_->text(),
-                               reg_nickname_->text().trimmed());
+    // 简单邮箱格式校验
+    if (!email.contains('@') || !email.contains('.')) {
+        reg_status_->setText("邮箱格式不正确（需要包含 @ 和 .）");
+        reg_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
+                                   "background: transparent; }");
+        return;
     }
-}
 
-void LoginDialog::on_socket_ready_read() {
-    recv_buf_.append(sock_->readAll());
-
-    // 解析粘包：4 字节长度头 + body
-    while (recv_buf_.size() >= 4) {
-        uint32_t body_len = qFromBigEndian(
-            *reinterpret_cast<const uint32_t*>(recv_buf_.constData()));
-        if (body_len > 64 * 1024 * 1024) {
-            recv_buf_.clear();
-            sock_->close();
-            return;
-        }
-        if (recv_buf_.size() < 4 + static_cast<int>(body_len)) break;
-
-        QByteArray body = recv_buf_.mid(4, body_len);
-        recv_buf_.remove(0, 4 + body_len);
-
-        // 解析 BaseMessage
-        wemeet::BaseMessage base;
-        if (!base.ParseFromString(std::string(body.constData(), body.size()))) continue;
-
-        if (!waiting_for_response_) continue;
-
-        timeout_timer_->stop();
-        waiting_for_response_ = false;
-
-        if (base.type() == wemeet::MSG_LOGIN_RESP) {
-            wemeet::LoginResp resp;
-            if (resp.ParseFromString(base.payload()) && resp.success()) {
-                // 登录成功
-                uint64_t uid = resp.user_id();
-                QString nick = QString::fromStdString(resp.nickname());
-                sock_->close();
-
-                // 恢复按钮状态后关闭
-                set_controls_enabled(true);
-                login_btn_->setText("登录");
-                emit login_success(uid, nick);
-                hide();
-                return;
-            } else {
-                // 登录失败
-                set_controls_enabled(true);
-                login_btn_->setText("登录");
-                login_status_->setText(
-                    QString("登录失败: %1")
-                        .arg(QString::fromStdString(resp.error_msg().empty()
-                            ? "邮箱或密码错误" : resp.error_msg())));
-                login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; }");
-                login_status_->show();
-                sock_->close();
-            }
-
-        } else if (base.type() == wemeet::MSG_REGISTER_RESP) {
-            wemeet::RegisterResp resp;
-            if (resp.ParseFromString(base.payload()) && resp.success()) {
-                set_controls_enabled(true);
-                reg_btn_->setText("注册");
-                sock_->close();
-
-                // 注册成功，自动切换到登录标签页并填充邮箱
-                QMessageBox::information(this, "成功", "注册成功！请输入密码登录。");
-                auto* tabs = findChild<QTabWidget*>();
-                if (tabs) tabs->setCurrentIndex(0);
-                login_email_->setText(reg_email_->text());
-                login_pass_->setFocus();
-            } else {
-                set_controls_enabled(true);
-                reg_btn_->setText("注册");
-                sock_->close();
-                login_status_->setText(
-                    QString("注册失败: %1")
-                        .arg(QString::fromStdString(resp.error_msg().empty()
-                            ? "该邮箱已被注册" : resp.error_msg())));
-                login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; }");
-                login_status_->show();
-            }
-        }
+    // 昵称为空时使用邮箱前缀
+    if (nick.isEmpty()) {
+        nick = email.left(email.indexOf('@'));
+        if (nick.isEmpty()) nick = email;
     }
+
+    reg_btn_->setEnabled(false);
+    reg_btn_->setText("正在注册...");
+    reg_status_->setText("正在向服务器提交...");
+    reg_status_->setStyleSheet("QLabel { color: #888; font-size: 13px; "
+                               "background: transparent; }");
+
+    // 发出信号，由 MainWindow 通过网络注册
+    emit register_request(email, pass, nick);
 }
-
-void LoginDialog::on_socket_error(QAbstractSocket::SocketError /*err*/) {
-    if (!waiting_for_response_) return;
-    waiting_for_response_ = false;
-    timeout_timer_->stop();
-
-    set_controls_enabled(true);
-    login_btn_->setText("登录");
-    reg_btn_->setText("注册");
-
-    login_status_->setText(
-        QString("连接失败: %1").arg(sock_->errorString()));
-    login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; }");
-    login_status_->show();
-}
-
-void LoginDialog::on_login_timeout() {
-    if (!waiting_for_response_) return;
-    waiting_for_response_ = false;
-    sock_->close();
-
-    set_controls_enabled(true);
-    login_btn_->setText("登录");
-    reg_btn_->setText("注册");
-
-    login_status_->setText("连接超时，请检查服务器是否运行");
-    login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; }");
-    login_status_->show();
-}
-
-// ── 关闭 / 窗口事件 ────────────────────────────────────────
 
 void LoginDialog::on_close_clicked() {
     reject();
 }
 
+// ── 窗口拖动事件 ──────────────────────────────────────────
 bool LoginDialog::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == title_bar_ && event->type() == QEvent::MouseButtonPress) {
+    if (!title_bar_) return QDialog::eventFilter(obj, event);
+    // 标题栏和其子控件都可拖动
+    QWidget* w = qobject_cast<QWidget*>(obj);
+    bool in_title_bar = (w == title_bar_ ||
+                         (w && title_bar_->isAncestorOf(w)));
+    if (in_title_bar && event->type() == QEvent::MouseButtonPress) {
         QMouseEvent* me = static_cast<QMouseEvent*>(event);
         if (me->button() == Qt::LeftButton) {
-            drag_pos_ = me->globalPosition().toPoint() - frameGeometry().topLeft();
-            dragging_ = true;
+            // 排除关闭按钮的点击
+            if (w != close_btn_) {
+                drag_pos_ = me->globalPosition().toPoint() - frameGeometry().topLeft();
+                dragging_ = true;
+            }
         }
     }
-    if (obj == title_bar_ && event->type() == QEvent::MouseMove) {
+    if (in_title_bar && event->type() == QEvent::MouseMove) {
         QMouseEvent* me = static_cast<QMouseEvent*>(event);
         if (dragging_ && (me->buttons() & Qt::LeftButton))
             move(me->globalPosition().toPoint() - drag_pos_);
     }
-    if (obj == title_bar_ && event->type() == QEvent::MouseButtonRelease)
+    if (in_title_bar && event->type() == QEvent::MouseButtonRelease) {
         dragging_ = false;
+    }
     return QDialog::eventFilter(obj, event);
 }
 
