@@ -219,12 +219,20 @@ void MainWindow::go_back() {
 }
 
 void MainWindow::on_back_requested() {
+    // 关闭媒体引擎（shutdown 内部有 initialized_ 保护，可重复调用）
+    if (media_engine_) {
+        media_engine_->shutdown();
+    }
     // 离开会议时通知服务器
     if (in_meeting_) {
         send_leave_meeting();
         in_meeting_ = false;
     }
-    go_back();
+    current_room_id_.clear();
+    // 确保回到大厅页面（会议选择界面）
+    stack_->setCurrentIndex(PAGE_LOBBY);
+    nav_history_.clear();
+    update_back_button();
 }
 
 // ── 服务器连接 ─────────────────────────────────────────────
@@ -536,12 +544,14 @@ void MainWindow::process_incoming_message(const std::string& data) {
         break;
     }
     case wemeet::MSG_MEDIA_RELAY_REGISTER_RESP: {
-        // 收到中继注册响应，保存其他参与者的 SSRC
+        // 收到中继注册响应，保存自己的 SSRC 与其他参与者的 SSRC
         wemeet::MediaRelayRegisterResp resp;
         if (resp.ParseFromString(base.payload())) {
             qDebug("MainWindow: MediaRelay registered, ssrc=%u, peers=%d",
                    resp.ssrc(), resp.peers_size());
             if (media_engine_) {
+                // 设置本端 RTP 同步源（video/audio 共用同一个 ssrc）
+                media_engine_->set_ssrc(resp.ssrc(), resp.ssrc());
                 for (const auto& peer : resp.peers()) {
                     if (peer.user_id() != current_user_id_) {
                         media_engine_->set_peer_ssrc(peer.user_id(), peer.ssrc());
@@ -679,14 +689,16 @@ void MainWindow::on_logout() {
     send_logout();
 
     if (media_engine_) media_engine_->shutdown();
-    if (network_) network_->disconnect();
+    // 不调用 network_->disconnect()，保持连接，以便继续创建/加入会议
+    // if (network_) network_->disconnect();
 
-    current_user_id_ = 0;
-    current_nickname_.clear();
     current_room_id_.clear();
-    nav_bar_->hide();
     nav_history_.clear();
     stack_->setCurrentIndex(PAGE_LOBBY);
+    update_back_button();
+
+    // 停留在大厅，保持连接状态
+    qDebug("MainWindow: left meeting, returning to lobby");
 }
 
 void MainWindow::on_network_quality_changed(int32_t quality) {

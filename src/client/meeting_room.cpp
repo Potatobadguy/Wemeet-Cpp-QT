@@ -14,6 +14,7 @@
 #include <QToolTip>
 #include <QResizeEvent>
 #include <QListWidget>
+#include <QTimer>
 #include <memory>
 
 // ── 构造函数/析构函数 ───────────────────────────────────────
@@ -110,7 +111,7 @@ void MeetingRoom::setup_ui() {
                                  "QPushButton:hover { background: #555; }");
     members_btn_->setCursor(Qt::PointingHandCursor);
 
-    back_btn_ = new QPushButton("⬅");
+    back_btn_ = new QPushButton("<- 返回");
     back_btn_->setToolTip("返回大厅");
     back_btn_->setStyleSheet(btn_base + "QPushButton { background: #666; }"
                               "QPushButton:hover { background: #555; }");
@@ -158,17 +159,20 @@ void MeetingRoom::setup_ui() {
     chat_display_ = new QTextEdit();
     chat_display_->setReadOnly(true);
     chat_display_->setPlaceholderText("等待消息...");
+    chat_display_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     chat_display_->setStyleSheet(
         "QTextEdit { background: #111122; color: #ccc; border: none; "
         "border-radius: 4px; padding: 8px; font-size: 12px; }");
 
     auto* input_row = new QHBoxLayout();
     input_row->setSpacing(6);
+    input_row->setContentsMargins(0, 4, 0, 4);
     chat_input_ = new QLineEdit();
     chat_input_->setPlaceholderText("输入消息...");
     chat_input_->setClearButtonEnabled(true);
-    chat_input_->setMinimumHeight(40);
-    chat_input_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    chat_input_->setFixedHeight(44);  // 强制 44px 高度
+    chat_input_->setMinimumSize(QSize(100, 44));
+    chat_input_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     chat_input_->setFocusPolicy(Qt::StrongFocus);
     chat_input_->setStyleSheet(
         "QLineEdit { background: #1a1a2e; color: #eee; border: 1px solid #444; "
@@ -176,10 +180,10 @@ void MeetingRoom::setup_ui() {
         "QLineEdit:focus { border-color: #4A90D9; background: #232336; }");
 
     send_btn_ = new QPushButton("发送");
-    send_btn_->setMinimumHeight(40);
-    send_btn_->setMinimumWidth(60);
+    send_btn_->setFixedHeight(44);
+    send_btn_->setFixedWidth(72);
     send_btn_->setCursor(Qt::PointingHandCursor);
-    send_btn_->setFocusPolicy(Qt::NoFocus);  // 不抢输入框的 Enter
+    send_btn_->setFocusPolicy(Qt::NoFocus);
     send_btn_->setAutoDefault(false);
     send_btn_->setDefault(false);
     send_btn_->setStyleSheet(
@@ -195,9 +199,12 @@ void MeetingRoom::setup_ui() {
     chat_layout->addWidget(chat_display_, 1);
     chat_layout->addLayout(input_row);
 
-    // 让 input_row 不会被压扁
-    chat_layout->setStretchFactor(chat_display_, 1);
-    chat_layout->setStretchFactor(input_row, 0);
+    // 点击 chat_display_ 时将焦点转移到输入框
+    chat_display_->setTextInteractionFlags(Qt::NoTextInteraction);
+    chat_display_->installEventFilter(this);
+
+    // 让输入框可以接收鼠标点击
+    chat_input_->setAttribute(Qt::WA_MouseTracking, true);
 
     gallery_page_layout->addWidget(chat_panel_, 1);
 
@@ -274,13 +281,34 @@ void MeetingRoom::set_room_info(const QString& room_id, const QString& title,
 
     // 清理后重新填充
     participants_.clear();
-    add_participant(local_user_id, nickname, true, true, true, true);
+    bool local_video_on = media_engine_ && media_engine_->camera_active();
+    add_participant(local_user_id, nickname, true, true, local_video_on, true);
+
+    // 无摄像头时禁用摄像头按钮并给出提示
+    if (video_btn_) {
+        video_btn_->setEnabled(local_video_on);
+        video_btn_->setToolTip(local_video_on ? "" : "无摄像头");
+    }
 
     qDebug("MeetingRoom: room=%s, user=%llu, nick=%s",
            qPrintable(room_id), local_user_id, qPrintable(nickname));
+
+    // 进入会议室后自动聚焦到聊天输入框
+    QTimer::singleShot(300, this, [this]() {
+        if (chat_input_) {
+            chat_input_->setFocus();
+            chat_input_->setEnabled(true);
+            chat_input_->setReadOnly(false);
+            qDebug("MeetingRoom: chat_input focused");
+        }
+    });
 }
 
 void MeetingRoom::set_media_engine(MediaEngine* engine) {
+    // 断开与旧媒体引擎的所有连接，避免重复进入会议时信号连接累积
+    if (media_engine_) {
+        disconnect(media_engine_, nullptr, this, nullptr);
+    }
     media_engine_ = engine;
     if (!media_engine_) return;
 
@@ -607,16 +635,12 @@ void MeetingRoom::on_volume_level_changed(double level) {
 }
 
 void MeetingRoom::on_hangup() {
-    if (media_engine_) {
-        media_engine_->shutdown();
-    }
+    // 媒体清理统一交由 MainWindow 处理，这里只发信号
     emit leave_meeting();
 }
 
 void MeetingRoom::on_back() {
-    if (media_engine_) {
-        media_engine_->shutdown();
-    }
+    // 媒体清理统一交由 MainWindow 处理，这里只发信号
     emit back_to_lobby();
 }
 
@@ -641,6 +665,17 @@ void MeetingRoom::append_chat_message(uint64_t user_id, const QString& sender_ni
         QString("<div style='color:%1; font-weight:bold;'>%2:</div>"
                 "<div style='color:#ddd; padding-left:12px; padding-bottom:4px;'>%3</div>")
             .arg(color, sender_nick.isEmpty() ? QString::number(user_id) : sender_nick, content));
+}
+
+bool MeetingRoom::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == chat_display_ && event->type() == QEvent::MouseButtonPress) {
+        // 点击聊天显示区域时，将焦点转移到输入框
+        if (chat_input_) {
+            chat_input_->setFocus();
+        }
+        return true;  // 阻止事件继续传播
+    }
+    return QWidget::eventFilter(obj, event);
 }
 
 void MeetingRoom::on_participant_context_menu(uint64_t user_id) {

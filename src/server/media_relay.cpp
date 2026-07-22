@@ -8,6 +8,7 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
 
 namespace wemeet {
 
@@ -117,6 +118,13 @@ void MediaRelay::relay_thread_func(int thread_id, uint16_t port) {
                                       (struct sockaddr*)&client_addr, &client_len);
 
         if (received > 0) {
+            // DEBUG: log first packet
+            static std::atomic<int> debug_count{0};
+            if (debug_count.fetch_add(1) < 20) {
+                LOG_INFO("MediaRelay[%d] port=%u received %zd bytes from %s:%u",
+                         thread_id, port, received,
+                         inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            }
             // 检查是否为 RTCP (payload type >= 200)
             if (received >= static_cast<ssize_t>(RTPHeader::kHeaderSize)) {
                 auto* hdr = reinterpret_cast<RTPHeader*>(recv_buf);
@@ -178,19 +186,19 @@ void MediaRelay::relay_thread_func(int thread_id, uint16_t port) {
                             std::lock_guard<std::mutex> rlk(rit->second->mutex);
                             for (auto& [uid, p] : rit->second->participants) {
                                 if (uid == sender_id) continue;
-                                for (auto& [mt, si] : p->streams) {
-                                    if (mt == media_type && si->active) {
-                                        struct sockaddr_in dest;
-                                        std::memset(&dest, 0, sizeof(dest));
-                                        dest.sin_family = AF_INET;
-                                        inet_pton(AF_INET, si->client_host.c_str(), &dest.sin_addr);
-                                        dest.sin_port = htons(si->client_port);
-                                        ::sendto(sock, recv_buf, received, 0,
-                                                 (struct sockaddr*)&dest, sizeof(dest));
-                                        total_packets_forwarded_++;
-                                        break;
-                                    }
+                            for (auto& [mt, si] : p->streams) {
+                                if (mt == media_type) {
+                                    struct sockaddr_in dest;
+                                    std::memset(&dest, 0, sizeof(dest));
+                                    dest.sin_family = AF_INET;
+                                    inet_pton(AF_INET, si->client_host.c_str(), &dest.sin_addr);
+                                    dest.sin_port = htons(si->client_port);
+                                    ::sendto(sock, recv_buf, received, 0,
+                                             (struct sockaddr*)&dest, sizeof(dest));
+                                    total_packets_forwarded_++;
+                                    break;
                                 }
+                            }
                             }
                         }
                     }
@@ -230,7 +238,6 @@ bool MediaRelay::register_participant(
         std::string& out_relay_host,
         uint16_t& out_relay_port) {
 
-    out_ssrc = allocate_ssrc();
     out_relay_host = bind_ip_;
     // 根据 media_type 分配到不同端口
     int relay_idx = (media_type == "audio") ? 0 :
@@ -251,6 +258,14 @@ bool MediaRelay::register_participant(
         p = std::make_shared<RelayParticipant>();
         p->user_id = user_id;
         p->nickname = nickname;
+    }
+
+    // 同一用户(video/audio/screen)复用同一个 ssrc，确保 RTP 同步源唯一，
+    // 这样中继与客户端都能用单一 ssrc 准确识别发送者。
+    if (!p->streams.empty()) {
+        out_ssrc = p->streams.begin()->second->ssrc;
+    } else {
+        out_ssrc = allocate_ssrc();
     }
 
     auto stream = std::make_shared<RTPStreamInfo>();

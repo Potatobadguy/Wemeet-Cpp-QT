@@ -109,6 +109,8 @@ public:
     uint32_t ssrc() const { return ssrc_; }
     void set_payload_type_video(uint8_t pt) { pt_video_ = pt; }
     void set_payload_type_audio(uint8_t pt) { pt_audio_ = pt; }
+    uint8_t payload_type_video() const { return pt_video_; }
+    uint8_t payload_type_audio() const { return pt_audio_; }
 
     // ── 发送 ─────────────────────────────────────────────
     void send_video_frame(const QByteArray& frame_data, bool is_keyframe,

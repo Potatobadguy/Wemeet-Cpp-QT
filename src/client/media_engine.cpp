@@ -272,7 +272,9 @@ bool MediaEngine::start_camera(const QByteArray& camera_id) {
             }
             return true;
         }
-        qWarning("MediaEngine: V4L2 fallback also failed");
+        qWarning("MediaEngine: V4L2 fallback also failed — no usable camera");
+        // 两种采集方式都失败，明确标记摄像头不可用
+        camera_available_ = false;
     }
 
     return true;
@@ -604,7 +606,7 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
     uint32_t ssrc = packet.ssrc();
     bool marker = packet.marker();
 
-    if (pt > 96) {
+    if (pt == rtp_session_->payload_type_video()) {
         // ── 视频包：按 SSRC+timestamp 组装 JPEG 帧 ──
         auto it = frame_assemblers_.find(ssrc);
         if (it == frame_assemblers_.end() || !it->second.active ||
@@ -637,14 +639,30 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                 QImage img;
                 if (img.loadFromData(jpeg, "JPEG") && !img.isNull()) {
                     QVideoFrame frame(img);
-                    // 找到对应的远端 widget
+                    // 找到对应的远端 widget（优先按精确 ssrc 匹配）
+                    RemoteVideoWidget* target_widget = nullptr;
+                    uint64_t target_uid = 0;
                     for (auto& rs : remote_streams_) {
-                        if (rs.ssrc == ssrc || rs.ssrc == 0) {
-                            if (rs.ssrc == 0) rs.ssrc = ssrc;  // 记录
-                            rs.widget->present_frame(frame);
-                            emit remote_video_frame(rs.user_id, frame);
+                        if (rs.ssrc == ssrc) {
+                            target_widget = rs.widget.get();
+                            target_uid = rs.user_id;
                             break;
                         }
+                    }
+                    // 尚未记录 ssrc 时，回退到第一个未设置的流
+                    if (!target_widget) {
+                        for (auto& rs : remote_streams_) {
+                            if (rs.ssrc == 0) {
+                                rs.ssrc = ssrc;
+                                target_widget = rs.widget.get();
+                                target_uid = rs.user_id;
+                                break;
+                            }
+                        }
+                    }
+                    if (target_widget) {
+                        target_widget->present_frame(frame);
+                        emit remote_video_frame(target_uid, frame);
                     }
                 }
             }
@@ -658,7 +676,7 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                 ++it;
             }
         }
-    } else {
+    } else if (pt == rtp_session_->payload_type_audio()) {
         // 音频包 — 透传（音频仍可后续扩展解码）
         emit remote_audio_data(packet.payload);
     }

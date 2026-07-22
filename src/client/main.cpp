@@ -5,8 +5,12 @@
 #include <QFile>
 #include <QFont>
 #include <QFontDatabase>
+#include <QGuiApplication>
 #include <QObject>
 #include <QMessageBox>
+#include <QPoint>
+#include <QRect>
+#include <QScreen>
 #include "main_window.h"
 #include "login_dialog.h"
 
@@ -51,6 +55,21 @@ static void setupCjkFont() {
     QApplication::setFont(font);
 }
 
+// 将窗口居中到主屏幕的可用区域（WSLg/Wayland 下默认位置常导致窗口跑出可见区）
+static void centerOnPrimaryScreen(QWidget* w) {
+    if (!w) return;
+    QScreen* screen = QGuiApplication::primaryScreen();
+    if (!screen) return;
+    QRect avail = screen->availableGeometry();
+    QSize  sz    = w->size();
+    int x = avail.x() + (avail.width()  - sz.width())  / 2;
+    int y = avail.y() + (avail.height() - sz.height()) / 2;
+    // 防止多屏幕下出现负坐标把窗口推出可见区
+    if (x < avail.x()) x = avail.x();
+    if (y < avail.y()) y = avail.y();
+    w->move(x, y);
+}
+
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("WeMeet");
@@ -63,10 +82,12 @@ int main(int argc, char* argv[]) {
     MainWindow main_window;
     main_window.setWindowTitle("WeMeet — 企业级视频会议");
     main_window.resize(1200, 800);
+    centerOnPrimaryScreen(&main_window);
 
     // 登录对话框（只采集凭据，网络认证由 MainWindow 通过 NetworkClient 完成）
     LoginDialog login_dialog;
     login_dialog.setWindowTitle("WeMeet — 登录");
+    centerOnPrimaryScreen(&login_dialog);
 
     QObject::connect(&login_dialog, &LoginDialog::login_request,
                      [&main_window, &login_dialog](const QString& email, const QString& password) {
@@ -86,9 +107,13 @@ int main(int argc, char* argv[]) {
                      [&main_window, &login_dialog](uint64_t user_id, const QString& nickname) {
         login_dialog.hide();
         main_window.on_login_success(user_id, nickname);
-        main_window.show();
+        // 显式 showNormal：避免 WSLg/Wayland 下窗口以最小化或不可见状态显示
+        if (main_window.isMinimized()) main_window.showNormal();
+        main_window.showNormal();
         main_window.raise();
         main_window.activateWindow();
+        // 重新居中（on_login_success 内部可能改了尺寸）
+        centerOnPrimaryScreen(&main_window);
         login_dialog.accept();
     });
 

@@ -368,8 +368,129 @@ cd build
 使用 `--relay-port` 参数指定其他端口（如 20000），客户端需同步配置。
 
 ### 多人会议在同一台机器测试
-- 可用 `Xephyr` 或 `Xvfb` 创建虚拟显示器
-- 或使用多 WSL 实例（`wsl --terminate` + 重新打开）
+
+#### 已知限制：Linux V4L2 设备独占
+
+`/dev/video*` 摄像头设备在 Linux/WSL 上**同时只能由一个进程打开**。如果在同一台机器上运行两个客户端，只有先启动的那个能成功捕获摄像头，后启动的客户端会显示黑色视频占位。
+
+以下提供三套解决方案：
+
+---
+
+#### 方案 A（推荐）：使用 V4L2 Loopback（虚拟摄像头）
+
+> 适用于 Linux 原生或已挂载摄像头的 WSL 环境。通过内核模块创建一个"虚拟摄像头"，程序可以向它写入模拟的视频数据，其他进程可以像真实摄像头一样读取。
+
+**步骤：**
+
+```bash
+# 1. 安装 v4l2loopback-dkms
+sudo apt install v4l2loopback-dkms
+
+# 2. 加载模块，创建虚拟设备 /dev/video10
+sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="VirtualCam"
+
+# 3. 验证
+ls /dev/video*
+# 输出示例: /dev/video0  /dev/video10
+
+# 4. 用 OBS Studio 将真实摄像头推送到虚拟设备
+#    a. 安装 OBS Studio: sudo apt install obs-studio
+#    b. 打开 OBS → 来源 → 视频采集设备（选真实摄像头）
+#    c. 工具 → V4L2 Linux 输出 → 设备选择 /dev/video10 → 启动
+#       如果插件未安装: sudo apt install v4l2loopback-utils obs-plugin-v4l2sink
+```
+
+**客户端配置：**
+- 修改 `src/client/v4l2_capture.cpp` 中的 `enum_devices()` 或直接硬编码：
+  ```cpp
+  // 客户端 A 使用 /dev/video0（真实摄像头）
+  // 客户端 B 使用 /dev/video10（虚拟摄像头）
+  ```
+- 或者启动时通过环境变量覆盖：
+  ```bash
+  # 终端 1 —— 客户端 A（真实摄像头）
+  ./build/src/client/wemeet_client
+
+  # 终端 2 —— 客户端 B（虚拟摄像头）
+  V4L2_DEVICE=/dev/video10 ./build/src/client/wemeet_client
+  ```
+
+---
+
+#### 方案 B：OBS Virtual Camera（Windows 原生方案）
+
+> 适用于在 Windows 上直接编译运行 Qt 客户端的场景。OBS Studio 提供跨平台的虚拟摄像头功能，Windows 上通过 DirectShow 驱动注册一个虚拟摄像头设备。
+
+**步骤：**
+
+```bash
+# 1. 安装 OBS Studio
+#    https://obsproject.com/download
+
+# 2. 安装 OBS-VirtualCam 插件
+#    Windows 版本已内置 Virtual Camera 功能
+
+# 3. 打开 OBS Studio
+#    a. 来源 → 添加"视频采集设备" → 选择你的真实摄像头
+#    b. 点击右下角"启动虚拟摄像机"（Start Virtual Camera）
+#    c. 推荐: 工具 → 自动启动虚拟摄像机（勾选）
+
+# 4. 此时系统多出一个虚拟摄像头设备：
+#    "OBS Virtual Camera"（在设备管理器和 Qt 中可见）
+```
+
+**客户端配置：**
+```cpp
+// src/client/media_engine.cpp
+// Qt Multimedia 会自动枚举所有 DirectShow 设备
+// 虚拟摄像头和真实摄像头会分别列出
+// 客户端 1 选真实摄像头
+// 客户端 2 选 OBS Virtual Camera
+```
+
+**在 WSL 中使用 Windows 版 OBS 推流到 WSL：**
+```bash
+# 前提：摄像头已通过 usbipd-win 挂载到 WSL（见下方说明）
+# WSL 内:
+sudo modprobe v4l2loopback devices=1 video_nr=10
+
+# 将 Windows 上 OBS 的虚拟摄像头透过 USB/IP 传到 WSL:
+usbipd bind --busid <OBS虚拟摄像头BUSID> --force
+usbipd attach --wsl --busid <OBS虚拟摄像头BUSID>
+```
+
+---
+
+#### 方案 C：两台物理机器测试（最简单可靠）
+
+| 机器 | 角色 | 启动命令 |
+|------|------|---------|
+| 本机（WSL） | 客户端 A + 服务器 | `./build/src/server/wemeet_server` + `./build/src/client/wemeet_client` |
+| 局域网另一台电脑 / 虚拟机 | 客户端 B | `./build/src/client/wemeet_client`（修改 `server_host_` 指向本机 IP） |
+
+客户端 B 修改 `src/client/main_window.h` 中的 `server_host_` 为本机局域网 IP：
+```cpp
+QString server_host_ = "192.168.x.x";  // 改为本机实际 IP
+uint16_t server_port_ = 9090;
+```
+两台机器的防火墙都需放行 9090（TCP）、10000–10001（UDP）端口。
+
+---
+
+#### 验证中继是否收到 UDP 包
+
+服务器日志会实时打印 UDP 包的接收情况（需要 DEBUG 日志级别）：
+```bash
+tail -f /tmp/wemeet_server.log | grep "MediaRelay"
+```
+正常输出应类似：
+```
+MediaRelay[1] port=10001 received 1380 bytes from 127.0.0.1:xxxxx
+MediaRelay[1] port=10001 received  654 bytes from 127.0.0.1:yyyyy
+```
+- 有日志 → 发送端正常，问题在接收端
+- 无日志 → 发送端没发 UDP 包（摄像头没捕获到帧）
 
 ### WSL2 客户端窗口不显示
 - Win11 + WSL2 自带 WSLg，直接运行即可

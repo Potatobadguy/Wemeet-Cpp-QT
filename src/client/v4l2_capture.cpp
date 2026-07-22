@@ -33,9 +33,12 @@ bool V4L2Capture::has_v4l2_device(const std::string& device_path) {
     if (fd < 0) return false;
 
     struct v4l2_capability cap;
+    std::memset(&cap, 0, sizeof(cap));
     bool is_v4l2 = (::ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0);
+    // 必须是真正的视频采集设备，排除 metadata / 输出设备
+    bool can_capture = is_v4l2 && (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE);
     ::close(fd);
-    return is_v4l2;
+    return can_capture;
 }
 
 int V4L2Capture::enum_devices(std::vector<std::string>& devices) {

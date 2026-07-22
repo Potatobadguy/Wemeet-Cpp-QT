@@ -39,6 +39,8 @@ class RemoteVideoWidget;
  */
 class MeetingRoom : public QWidget {
     Q_OBJECT
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
 public:
     explicit MeetingRoom(QWidget* parent = nullptr);
     ~MeetingRoom();
