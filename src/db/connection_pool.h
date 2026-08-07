@@ -59,7 +59,11 @@ public:
 
     // ── 统计 ─────────────────────────────────────────────
     size_t active_count() const   { return active_count_.load(); }
-    size_t idle_count()    const { return idle_conns_.size(); }
+    // idle_conns_ 在 acquire()/release() 中于锁内修改，此处读取同样加锁（#10）
+    size_t idle_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return idle_conns_.size();
+    }
 
 private:
     MYSQL* create_connection();
@@ -68,7 +72,7 @@ private:
 
     Config                      config_;
     std::deque<MYSQL*>          idle_conns_;
-    std::mutex                  mutex_;
+    mutable std::mutex          mutex_;   // mutable：供 const 统计方法加锁
     std::condition_variable     cv_;
     std::atomic<size_t>         total_count_{0};
     std::atomic<size_t>         active_count_{0};

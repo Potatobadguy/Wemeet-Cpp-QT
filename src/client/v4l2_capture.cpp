@@ -93,8 +93,6 @@ bool V4L2Capture::open(const std::string& device_path, int width, int height, in
     if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
         qWarning("V4L2: %s no streaming support, trying read() instead", device_path.c_str());
     }
-
-    qDebug("V4L2: opened %s — %s", device_path.c_str(), device_name_.c_str());
     return init_device(width, height);
 }
 
@@ -103,25 +101,15 @@ void V4L2Capture::close() {
 
     ::close(fd_);
     fd_ = -1;
-    qDebug("V4L2: device closed");
 }
 
 // ── 初始化设备格式 ─────────────────────────────────────────
 
 bool V4L2Capture::init_device(int width, int height) {
-    // 先列出设备支持的格式
     struct v4l2_fmtdesc fmt_desc;
     std::memset(&fmt_desc, 0, sizeof(fmt_desc));
     fmt_desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    qDebug("V4L2: supported formats:");
     while (::ioctl(fd_, VIDIOC_ENUM_FMT, &fmt_desc) == 0) {
-        qDebug("  [%d] %c%c%c%c  %s",
-               fmt_desc.index,
-               (fmt_desc.pixelformat >> 0) & 0xFF,
-               (fmt_desc.pixelformat >> 8) & 0xFF,
-               (fmt_desc.pixelformat >> 16) & 0xFF,
-               (fmt_desc.pixelformat >> 24) & 0xFF,
-               fmt_desc.description);
         fmt_desc.index++;
     }
 
@@ -150,7 +138,6 @@ bool V4L2Capture::init_device(int width, int height) {
             selected_fourcc = fmt.fmt.pix.pixelformat;
             width_  = fmt.fmt.pix.width;
             height_ = fmt.fmt.pix.height;
-            qDebug("V4L2: format set to %s (%dx%d)", f.name, width_, height_);
             break;
         }
     }
@@ -169,13 +156,6 @@ bool V4L2Capture::init_device(int width, int height) {
         parm.parm.capture.timeperframe.denominator = fps_;
         ::ioctl(fd_, VIDIOC_S_PARM, &parm);
     }
-
-    qDebug("V4L2: format set to %dx%d @ %dfps, fourcc=%c%c%c%c",
-           width_, height_, fps_,
-           (selected_fourcc >> 0) & 0xFF,
-           (selected_fourcc >> 8) & 0xFF,
-           (selected_fourcc >> 16) & 0xFF,
-           (selected_fourcc >> 24) & 0xFF);
 
     // 尝试 mmap，失败则降级到 read 模式
     if (init_mmap()) {
@@ -229,16 +209,13 @@ bool V4L2Capture::init_mmap() {
         }
     }
 
-    qDebug("V4L2: %zu buffers allocated (mmap)", buffers_.size());
     return true;
 }
 
 // ── read() 模式降级 ────────────────────────────────────────
 
 bool V4L2Capture::try_read_mode() {
-    // read() 模式不需要 mmap 缓冲区，直接读取即可
     use_read_mode_ = true;
-    qDebug("V4L2: using read() mode for %s", device_name_.c_str());
     return true;
 }
 
@@ -296,8 +273,6 @@ bool V4L2Capture::start() {
     // 立即捕获第一帧
     capture_frame();
 
-    qDebug("V4L2: capture started (%dx%d @ %dfps%s)", width_, height_, fps_,
-           use_read_mode_ ? ", read mode" : "");
     return true;
 }
 
@@ -308,7 +283,6 @@ void V4L2Capture::stop() {
     capture_timer_->stop();
     stop_stream();
 
-    qDebug("V4L2: capture stopped (%lld frames)", (long long)frame_count_);
 }
 
 // ── 帧捕获 ─────────────────────────────────────────────────
@@ -416,8 +390,6 @@ void V4L2Capture::capture_frame() {
             video_frame.setStartTime(frame_count_ * 33'333);
             emit frame_captured(video_frame);
             frame_count_++;
-        } else if (frame_count_ % 30 == 0) {
-            qDebug("V4L2: skip frame #%lld (size=%zu)", (long long)frame_count_, data_len);
         }
     }
 }

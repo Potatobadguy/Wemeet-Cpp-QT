@@ -1,7 +1,8 @@
 #include "media_engine.h"
 #include "rtp_session.h"
+#include "common.pb.h"
+#include "media.pb.h"
 #include <QVideoFrame>
-#include <cmath>
 #include <QMediaDevices>
 #include <QCameraDevice>
 #include <QAudioDevice>
@@ -12,6 +13,25 @@
 #include <QWindow>
 #include <QElapsedTimer>
 #include <cmath>
+#include <chrono>
+
+namespace {
+
+// 辅助：把子消息序列化为 BaseMessage（不含长度头，长度头由 NetworkClient 添加）
+QByteArray make_signaling_msg(int msg_type, const std::string& payload_bytes) {
+    wemeet::BaseMessage base;
+    base.set_type(static_cast<wemeet::MsgType>(msg_type));
+    base.set_sequence_id(0);
+    base.set_timestamp_ms(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    base.set_payload(payload_bytes);
+    std::string out;
+    base.SerializeToString(&out);
+    return QByteArray(out.data(), static_cast<int>(out.size()));
+}
+
+} // namespace
 
 // ── RemoteVideoWidget ───────────────────────────────────────
 
@@ -62,6 +82,12 @@ void RemoteVideoWidget::set_video_on(bool on) {
     update();
 }
 
+void RemoteVideoWidget::set_share_paused_hint(bool paused) {
+    if (share_paused_hint_ == paused) return;
+    share_paused_hint_ = paused;
+    update();
+}
+
 void RemoteVideoWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
@@ -75,6 +101,17 @@ void RemoteVideoWidget::paintEvent(QPaintEvent* /*event*/) {
             int x = (widget_size.width() - scaled.width()) / 2;
             int y = (widget_size.height() - scaled.height()) / 2;
             painter.drawImage(x, y, scaled);
+        }
+        // #20 观看端：远端暂停共享时叠加半透明提示
+        if (share_paused_hint_) {
+            painter.fillRect(rect(), QColor(0, 0, 0, 140));
+            QFont f = painter.font();
+            f.setPointSize(14);
+            f.setBold(true);
+            painter.setFont(f);
+            painter.setPen(QColor(0xFF, 0xD7, 0x00));
+            painter.drawText(rect(), Qt::AlignCenter,
+                             QStringLiteral("‖ 对方已暂停共享"));
         }
     } else {
         painter.fillRect(rect(), QColor(0x16, 0x21, 0x3e));
@@ -133,7 +170,29 @@ MediaEngine::MediaEngine(QObject* parent)
             // 更新带宽估计
             bandwidth_estimator_->report_loss(s.packet_loss_rate);
             bandwidth_estimator_->report_bitrate(s.bitrate_kbps);
+            // #21：喂给屏幕共享控制器做三档自适应（本地发送侧丢包率）
+            if (share_controller_ && screen_sharing_) {
+                share_controller_->update_network_stats(s.packet_loss_rate);
+            }
             emit stats_ready(s);
+
+            // ★ 通过信令通道上报统计到服务器（触发服务端自适应带宽建议）
+            if (user_id_ != 0 && !room_id_.isEmpty() && s.packets_sent > 0) {
+                wemeet::MediaStatsReport report;
+                report.set_user_id(user_id_);
+                report.set_room_id(room_id_.toStdString());
+                report.set_packet_loss_rate(s.packet_loss_rate);
+                report.set_round_trip_time(s.rtt_ms);
+                report.set_jitter_ms(s.jitter_ms);
+                report.set_bitrate_kbps(s.bitrate_kbps);
+                report.set_sent_bitrate_kbps(current_bandwidth());
+                report.set_signal_quality(bandwidth_estimator_->network_quality());
+
+                std::string payload;
+                report.SerializeToString(&payload);
+                emit signaling_message(make_signaling_msg(
+                    static_cast<int>(wemeet::MSG_MEDIA_STATS_REPORT), payload));
+            }
         }
         // 定期发送 RTCP SR
         if (rtp_session_->is_bound() && !relay_host_.isNull()) {
@@ -141,9 +200,18 @@ MediaEngine::MediaEngine(QObject* parent)
         }
     });
 
-    // 屏幕共享定时器
-    screen_capture_timer_ = new QTimer(this);
-    connect(screen_capture_timer_, &QTimer::timeout, this, &MediaEngine::capture_screen_frame);
+    // 屏幕共享控制器（抓帧/帧差/自适应全部委托给它，#20-24）
+    share_controller_ = new ScreenShareController(this);
+    connect(share_controller_, &ScreenShareController::frame_ready,
+            this, &MediaEngine::on_share_frame);
+    connect(share_controller_, &ScreenShareController::state_changed,
+            this, &MediaEngine::on_share_state_changed);
+    connect(share_controller_, &ScreenShareController::source_invalidated,
+            this, [this](const QString& reason) {
+        // #24：源失效 → 暂停共享并通知 UI 提示用户重新选择
+        send_screen_control(true);
+        emit share_source_invalidated(reason);
+    });
 }
 
 MediaEngine::~MediaEngine() {
@@ -165,18 +233,11 @@ bool MediaEngine::initialize(uint64_t user_id, const QString& room_id) {
 
     // 缓存摄像头可用性
     camera_available_ = !QMediaDevices::videoInputs().isEmpty();
-    if (camera_available_) {
-        qDebug("MediaEngine: Qt camera available");
-    } else {
+    if (!camera_available_) {
         // Qt 摄像头不可用时，检测 V4L2 设备
         std::vector<std::string> v4l2_devs;
         int n = V4L2Capture::enum_devices(v4l2_devs);
         camera_available_ = (n > 0);
-        if (camera_available_) {
-            qDebug("MediaEngine: V4L2 fallback available (%d device(s))", n);
-        } else {
-            qDebug("MediaEngine: no camera available");
-        }
     }
 
     stats_timer_->start(2000);  // 每2秒统计
@@ -195,6 +256,14 @@ void MediaEngine::shutdown() {
     stop_screen_share();
     rtp_session_->unbind();
 
+    // 安全销毁所有远端 widget：解父子 + deleteLater（事件循环中清理）
+    for (auto& rs : remote_streams_) {
+        if (rs.widget) {
+            rs.widget->setParent(nullptr);
+            rs.widget->deleteLater();
+            rs.widget = nullptr;
+        }
+    }
     remote_streams_.clear();
     initialized_ = false;
 }
@@ -207,17 +276,25 @@ bool MediaEngine::start_camera(const QByteArray& camera_id) {
         return false;
     }
 
+    // ★ Linux/WSL 下 V4L2 比 Qt Multimedia 更可靠（WSLg 经常找不到 Qt 摄像头）
+    // 优先尝试 V4L2：它能直接读写 /dev/video*，帧通过 on_v4l2_frame_captured
+    // 同时喂给本地预览和 RTP 发送
+    if (try_v4l2_capture()) {
+        return true;
+    }
+    qWarning("MediaEngine: V4L2 not available, falling back to Qt Multimedia");
+
+    // ── Qt Multimedia 降级路径 ──
     QList<QCameraDevice> cameras = QMediaDevices::videoInputs();
     if (cameras.isEmpty()) {
         camera_available_ = false;
-        qWarning("MediaEngine: no camera available");
+        qWarning("MediaEngine: no camera available (neither V4L2 nor Qt)");
         return false;
     }
 
     QCameraDevice device;
     if (!camera_id.isEmpty()) {
         for (auto& d : cameras) {
-            // 使用第一个可用设备作为简化
             device = d;
             break;
         }
@@ -232,10 +309,8 @@ bool MediaEngine::start_camera(const QByteArray& camera_id) {
     capture_session_->setCamera(camera_.get());
     capture_session_->setVideoSink(video_sink_.get());
 
-    // 重新连接本地预览控件（关闭摄像头再开启后需要重连）
-    if (local_preview_widget_) {
-        capture_session_->setVideoOutput(local_preview_widget_);
-    }
+    // 注：本地预览通过 RemoteVideoWidget::present_frame 由 on_video_frame_captured 完成
+    // 不再依赖 capture_session_->setVideoOutput(QVideoWidget)
 
     connect(video_sink_.get(), &QVideoSink::videoFrameChanged,
             this, &MediaEngine::on_video_frame_captured);
@@ -252,29 +327,9 @@ bool MediaEngine::start_camera(const QByteArray& camera_id) {
 
     camera_->start();
     camera_active_ = true;
-    qDebug("MediaEngine: camera started");
 
     if (!video_muted_) {
-        // 开始发送视频帧的定时器
         start_capture_timer();
-    }
-
-    // ── V4L2 降级 ────────────────────────────────────────
-    // Qt Multimedia 摄像头不可用时，直接通过 V4L2 访问 /dev/video*
-    if (!camera_active_) {
-        qDebug("MediaEngine: trying V4L2 fallback...");
-        if (try_v4l2_capture()) {
-            qDebug("MediaEngine: V4L2 camera started via %s",
-                   v4l2_capture_->device_name().c_str());
-
-            if (!video_muted_) {
-                start_capture_timer();
-            }
-            return true;
-        }
-        qWarning("MediaEngine: V4L2 fallback also failed — no usable camera");
-        // 两种采集方式都失败，明确标记摄像头不可用
-        camera_available_ = false;
     }
 
     return true;
@@ -286,7 +341,6 @@ void MediaEngine::stop_camera() {
             v4l2_capture_->stop();
         }
         v4l2_active_ = false;
-        qDebug("MediaEngine: V4L2 camera stopped");
     }
 
     if (camera_active_) {
@@ -298,7 +352,6 @@ void MediaEngine::stop_camera() {
         capture_session_.reset();
         video_sink_.reset();
         camera_active_ = false;
-        qDebug("MediaEngine: camera stopped");
     }
 }
 
@@ -316,11 +369,6 @@ bool MediaEngine::try_v4l2_capture() {
     if (V4L2Capture::enum_devices(devices) == 0) {
         qWarning("MediaEngine: no V4L2 devices found");
         return false;
-    }
-
-    qDebug("MediaEngine: found %zu V4L2 device(s)", devices.size());
-    for (size_t i = 0; i < devices.size(); ++i) {
-        qDebug("  [%zu] %s", i, devices[i].c_str());
     }
 
     // 尝试第一个设备
@@ -350,6 +398,11 @@ bool MediaEngine::try_v4l2_capture() {
 void MediaEngine::on_v4l2_frame_captured(const QVideoFrame& frame) {
     emit local_video_frame(frame);
 
+    // ★ 本地预览（与 Qt 路径共用 RemoteVideoWidget）
+    if (local_preview_widget_ && !video_muted_) {
+        local_preview_widget_->present_frame(frame);
+    }
+
     // 发送到中继服务器
     if (rtp_session_->is_bound() && !relay_host_.isNull() && !video_muted_) {
         QVideoFrame clone(frame);
@@ -363,6 +416,15 @@ void MediaEngine::on_v4l2_frame_captured(const QVideoFrame& frame) {
             clone.unmap();
 
             rtp_session_->send_video_frame(jpeg_data, true, relay_host_, relay_video_port_);
+            // 每 100 帧记录一次发送统计，方便排查流是否在出
+            static std::atomic<uint64_t> v4l2_sent{0};
+            uint64_t n = v4l2_sent.fetch_add(1);
+            if (n % 100 == 0) {
+                qDebug("MediaEngine: v4l2 sent %llu frames, dst=%s:%u, ssrc=%u, size=%lld",
+                       n + 1, relay_host_.toString().toUtf8().constData(),
+                       relay_video_port_, rtp_session_ ? rtp_session_->payload_type_video() : 0,
+                       (long long)jpeg_data.size());
+            }
         }
     }
 }
@@ -422,7 +484,6 @@ bool MediaEngine::start_microphone() {
                 rtp_session_->send_audio_frame(audio_data, relay_host_, relay_audio_port_);
             }
         });
-        qDebug("MediaEngine: microphone started");
         return true;
     }
 
@@ -438,60 +499,137 @@ void MediaEngine::stop_microphone() {
     }
     audio_io_.reset();
     mic_active_ = false;
-    qDebug("MediaEngine: microphone stopped");
+}
+
+// ── 屏幕共享（委托 ScreenShareController，#19-24）────────────
+
+bool MediaEngine::start_screen_share(const ShareSource& source) {
+    // 正常共享中重复调用 → 忽略；暂停/源失效态允许换新源重启（#24）
+    if (screen_sharing_ && share_controller_->state() == ShareState::Sharing) {
+        return true;
+    }
+
+    if (!share_controller_->start(source)) {
+        return false;   // 源无效（controller 已发 source_invalidated）
+    }
+
+    screen_sharing_ = true;
+    qDebug("MediaEngine: screen sharing started (%s: %s)",
+           source.is_window() ? "window" : "screen", qPrintable(source.title));
+    return true;
 }
 
 bool MediaEngine::start_screen_share(int screen_index) {
-    if (screen_sharing_) return true;
+    // 便捷重载：整屏共享（保持旧调用兼容）
+    ShareSource source;
+    source.type = ShareSource::Type::SCREEN;
+    source.screen_index = screen_index;
+    source.title = QStringLiteral("屏幕 %1").arg(screen_index + 1);
+    return start_screen_share(source);
+}
 
-    QList<QScreen*> screens = QGuiApplication::screens();
-    if (screen_index < 0 || screen_index >= screens.size()) {
-        qWarning("MediaEngine: invalid screen index %d", screen_index);
-        return false;
-    }
+void MediaEngine::pause_screen_share() {
+    if (!screen_sharing_) return;
+    share_controller_->pause();
+    send_screen_control(true);    // MediaControl{SCREEN, mute=true} 冻结标志
+    emit screen_share_paused();
+}
 
-    screen_index_ = screen_index;
-    screen_sharing_ = true;
-
-    // 每秒 5 帧的屏幕共享
-    screen_capture_timer_->start(200);
-    emit screen_share_started();
-    qDebug("MediaEngine: screen sharing started (screen %d)", screen_index);
-    return true;
+void MediaEngine::resume_screen_share() {
+    if (!screen_sharing_) return;
+    share_controller_->resume();
+    send_screen_control(false);   // MediaControl{SCREEN, mute=false} 解冻
+    emit screen_share_resumed();
 }
 
 void MediaEngine::stop_screen_share() {
     if (!screen_sharing_) return;
-    screen_capture_timer_->stop();
+    share_controller_->stop();
     screen_sharing_ = false;
-    emit screen_share_stopped();
     qDebug("MediaEngine: screen sharing stopped");
 }
 
-void MediaEngine::capture_screen_frame() {
-    if (!screen_sharing_ || relay_host_.isNull()) return;
+/**
+ * @brief 共享冻结标志信令（#20）
+ *
+ * 复用既有 MediaControl{media_type=SCREEN, mute=true/false} 通道，
+ * 服务端收到后广播给房间内其他参与者，观看端据此叠加/解除
+ * 「对方已暂停共享」提示。
+ */
+void MediaEngine::send_screen_control(bool mute) {
+    if (user_id_ == 0 || room_id_.isEmpty()) return;
 
-    QList<QScreen*> screens = QGuiApplication::screens();
-    if (screen_index_ >= screens.size()) return;
+    wemeet::MediaControl ctrl;
+    ctrl.set_target_user_id(user_id_);          // 控制对象 = 自己
+    ctrl.set_room_id(room_id_.toStdString());
+    ctrl.set_media_type(wemeet::MediaControl::SCREEN);
+    ctrl.set_mute(mute);
 
-    QScreen* screen = screens[screen_index_];
-    if (!screen) return;
+    std::string payload;
+    ctrl.SerializeToString(&payload);
+    emit signaling_message(make_signaling_msg(
+        static_cast<int>(wemeet::MSG_MEDIA_CONTROL), payload));
+}
 
-    QPixmap pixmap = screen->grabWindow(0);
+/**
+ * @brief 共享帧到达：JPEG 编码（质量参数化，#21）+ RTP 发送
+ */
+void MediaEngine::on_share_frame(const QImage& frame, int jpeg_quality) {
+    if (frame.isNull()) return;
+
+    // ── 本地预览 ──
+    if (local_preview_widget_) {
+        QImage img = frame.convertToFormat(QImage::Format_ARGB32);
+        QVideoFrameFormat vff(QSize(img.width(), img.height()),
+                              QVideoFrameFormat::Format_ARGB8888);
+        QVideoFrame vf(vff);
+        if (vf.map(QVideoFrame::WriteOnly)) {
+            std::memcpy(vf.bits(0), img.constBits(),
+                        static_cast<size_t>(img.sizeInBytes()));
+            vf.unmap();
+            local_preview_widget_->present_frame(vf);
+        }
+    }
+
+    // ── 编码发送 ──
+    if (relay_host_.isNull() || !rtp_session_->is_bound()) return;
+
     QByteArray screen_data;
     QBuffer buffer(&screen_data);
     buffer.open(QIODevice::WriteOnly);
-    pixmap.save(&buffer, "JPEG", 70); // JPEG 压缩控制质量
+    frame.save(&buffer, "JPEG", jpeg_quality);   // 质量由自适应档位决定
 
-    if (rtp_session_->is_bound()) {
-        rtp_session_->send_video_frame(screen_data, true, relay_host_, relay_video_port_);
+    rtp_session_->send_video_frame(screen_data, true, relay_host_, relay_video_port_);
+
+    static std::atomic<uint64_t> screen_sent{0};
+    uint64_t n = screen_sent.fetch_add(1);
+    if (n % 50 == 0) {
+        qDebug("MediaEngine: screen share sent %llu frames, %dx%d, q=%d, size=%lld",
+               n + 1, frame.width(), frame.height(), jpeg_quality,
+               (long long)screen_data.size());
+    }
+}
+
+void MediaEngine::on_share_state_changed(ShareState state) {
+    switch (state) {
+    case ShareState::Sharing:
+        if (!screen_sharing_) screen_sharing_ = true;
+        emit screen_share_started();
+        break;
+    case ShareState::Idle:
+        if (screen_sharing_) screen_sharing_ = false;
+        emit screen_share_stopped();
+        break;
+    case ShareState::Paused:
+        // 暂停/恢复的信令发送与信号在 pause/resume_screen_share() 中处理
+        break;
     }
 }
 
 RemoteVideoWidget* MediaEngine::create_remote_video_widget(uint64_t user_id, QWidget* parent) {
     // 检查是否已存在
     for (auto& rs : remote_streams_) {
-        if (rs.user_id == user_id) return rs.widget.get();
+        if (rs.user_id == user_id) return rs.widget;
     }
 
     RemoteStream rs;
@@ -502,24 +640,32 @@ RemoteVideoWidget* MediaEngine::create_remote_video_widget(uint64_t user_id, QWi
         rs.ssrc = it->second;
         pending_peer_ssrc_.erase(it);
     }
-    rs.widget = std::make_unique<RemoteVideoWidget>(parent);
-    remote_streams_.push_back(std::move(rs));
+    // 由 Qt 父-子对象系统独占管理生命周期
+    rs.widget = new RemoteVideoWidget(parent);
+    remote_streams_.push_back(rs);
 
     qDebug("MediaEngine: created remote video widget for user=%llu, ssrc=%u",
            user_id, rs.ssrc);
-    return remote_streams_.back().widget.get();
+    return remote_streams_.back().widget;
 }
 
 void MediaEngine::remove_remote_video_widget(uint64_t user_id) {
-    remote_streams_.erase(
-        std::remove_if(remote_streams_.begin(), remote_streams_.end(),
-                        [user_id](const RemoteStream& rs) { return rs.user_id == user_id; }),
-        remote_streams_.end());
+    for (auto it = remote_streams_.begin(); it != remote_streams_.end(); ++it) {
+        if (it->user_id == user_id) {
+            // 先解父子关系，再用 deleteLater 在事件循环中安全销毁
+            if (it->widget) {
+                it->widget->setParent(nullptr);
+                it->widget->deleteLater();
+            }
+            remote_streams_.erase(it);
+            return;
+        }
+    }
 }
 
 RemoteVideoWidget* MediaEngine::get_remote_widget(uint64_t user_id) const {
     for (auto& rs : remote_streams_) {
-        if (rs.user_id == user_id) return rs.widget.get();
+        if (rs.user_id == user_id) return rs.widget;
     }
     return nullptr;
 }
@@ -528,24 +674,24 @@ void MediaEngine::set_relay_server(const QHostAddress& host, uint16_t video_port
     relay_host_ = host;
     relay_video_port_ = video_port;
     relay_audio_port_ = audio_port;
+    qDebug("MediaEngine: relay = %s, video→port %u, audio→port %u",
+           host.toString().toUtf8().constData(), video_port, audio_port);
 }
 
 void MediaEngine::set_ssrc(uint32_t video_ssrc, uint32_t audio_ssrc) {
     video_ssrc_ = video_ssrc;
     audio_ssrc_ = audio_ssrc;
     rtp_session_->set_ssrc(video_ssrc);
+    qDebug("MediaEngine: RTP ssrc set = %u (video=%u, audio=%u)",
+           video_ssrc, video_ssrc, audio_ssrc);
 }
 
-void MediaEngine::set_local_preview(QVideoWidget* widget) {
+void MediaEngine::set_local_preview(RemoteVideoWidget* widget) {
     local_preview_widget_ = widget;
-    if (capture_session_ && widget) {
-        capture_session_->setVideoOutput(widget);
-    }
 }
 
 void MediaEngine::mute_audio(bool mute) {
     audio_muted_ = mute;
-    qDebug("MediaEngine: audio %s", mute ? "muted" : "unmuted");
 }
 
 void MediaEngine::mute_video(bool mute) {
@@ -555,11 +701,18 @@ void MediaEngine::mute_video(bool mute) {
     } else {
         start_capture_timer();
     }
-    qDebug("MediaEngine: video %s", mute ? "muted" : "unmuted");
 }
 
 uint32_t MediaEngine::current_bandwidth() const {
     return bandwidth_estimator_->estimated_bandwidth();
+}
+
+void MediaEngine::apply_bandwidth_hint(uint32_t max_bitrate_kbps) {
+    if (!rtp_session_) return;
+    rtp_session_->set_max_bitrate(max_bitrate_kbps);
+    // 同步给本地带宽估计器，保证后续 stats 上报与建议一致
+    bandwidth_estimator_->report_bitrate(max_bitrate_kbps);
+    qDebug("MediaEngine: applied bandwidth hint = %u kbps", max_bitrate_kbps);
 }
 
 int32_t MediaEngine::network_quality() const {
@@ -622,7 +775,20 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
             fa.last_update.start();
             frame_assemblers_[ssrc] = std::move(fa);
         } else {
-            // 追加分片
+            // 追加分片；若发现中间缺包，尝试用 FEC 冗余还原后补入
+            while (it->second.expected_next_seq != seq) {
+                uint16_t missing = it->second.expected_next_seq;
+                QByteArray recovered;
+                if (rtp_session_->recover_fec(missing, recovered)) {
+                    it->second.jpeg_data.append(recovered);
+                    // 补偿成功：记录丢包但补回数据，避免花屏
+                    it->second.lost_compensated++;
+                } else {
+                    // 无法还原，跳过该缺失分片，继续推进期望序号
+                    it->second.missing_packets++;
+                }
+                it->second.expected_next_seq = static_cast<uint16_t>(missing + 1);
+            }
             it->second.jpeg_data.append(packet.payload);
             it->second.expected_next_seq = static_cast<uint16_t>(seq + 1);
             it->second.last_update.restart();
@@ -644,7 +810,7 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                     uint64_t target_uid = 0;
                     for (auto& rs : remote_streams_) {
                         if (rs.ssrc == ssrc) {
-                            target_widget = rs.widget.get();
+                            target_widget = rs.widget;
                             target_uid = rs.user_id;
                             break;
                         }
@@ -654,7 +820,7 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                         for (auto& rs : remote_streams_) {
                             if (rs.ssrc == 0) {
                                 rs.ssrc = ssrc;
-                                target_widget = rs.widget.get();
+                                target_widget = rs.widget;
                                 target_uid = rs.user_id;
                                 break;
                             }
@@ -694,6 +860,11 @@ void MediaEngine::on_quality_changed(int32_t quality) {
 void MediaEngine::on_video_frame_captured(const QVideoFrame& frame) {
     emit local_video_frame(frame);
 
+    // ★ 本地预览：直接 present_frame（与 V4L2 路径共用同一 widget）
+    if (local_preview_widget_ && !video_muted_) {
+        local_preview_widget_->present_frame(frame);
+    }
+
     // 发送到中继服务器
     if (rtp_session_->is_bound() && !relay_host_.isNull() && !video_muted_) {
         QVideoFrame clone(frame);
@@ -707,6 +878,16 @@ void MediaEngine::on_video_frame_captured(const QVideoFrame& frame) {
             clone.unmap();
 
             rtp_session_->send_video_frame(jpeg_data, true, relay_host_, relay_video_port_);
+            // 每 100 帧记录一次发送统计
+            static std::atomic<uint64_t> cam_sent{0};
+            uint64_t n = cam_sent.fetch_add(1);
+            if (n % 100 == 0) {
+                qDebug("MediaEngine: camera sent %llu frames, dst=%s:%u, ssrc=%u, size=%lld",
+                       n + 1, relay_host_.toString().toUtf8().constData(),
+                       relay_video_port_,
+                       rtp_session_ ? rtp_session_->payload_type_video() : 0,
+                       (long long)jpeg_data.size());
+            }
         }
     }
 }

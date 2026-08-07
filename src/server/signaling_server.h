@@ -33,6 +33,8 @@ public:
         std::string db_host = "127.0.0.1";
         int         db_port = 3306;
         std::string db_user = "root";
+        // #14：禁止硬编码默认密码。默认空，启动时由 main.cpp 校验：
+        // 命令行 --db-pass 优先，其次环境变量 WEMEET_DB_PASS，仍为空则报错退出。
         std::string db_pass = "";
         std::string db_name = "wemeet";
 

@@ -26,6 +26,8 @@
 class RtpSession;
 class MediaEngine;
 class RemoteVideoWidget;
+class FloatingShareToolbar;
+struct ShareSource;
 
 /**
  * @brief 增强会议室界面 — 实时视频画廊 + 控制栏 + 聊天 + 自适应布局
@@ -60,6 +62,13 @@ public:
     // 屏幕共享
     void on_screen_share_started(uint64_t user_id, const QString& nickname);
     void on_screen_share_stopped(uint64_t user_id);
+
+    /**
+     * @brief 远端共享暂停/恢复状态（#20 观看端入口）
+     *        由信令层收到 MediaControl{SCREEN} 广播后调用，
+     *        在对应 RemoteVideoWidget 上叠加/解除「对方已暂停共享」。
+     */
+    void on_remote_share_paused(uint64_t user_id, bool paused);
 
     // 网络质量
     void update_network_quality(int32_t quality);
@@ -96,6 +105,12 @@ private slots:
 
 private:
     void setup_ui();
+
+    // ── 屏幕共享（#19/#23/#24）───────────────────────────
+    void show_share_dialog();              // 弹出共享源选择对话框
+    void start_sharing_with(const ShareSource& source);  // 开始共享 + 显示工具条
+    void stop_sharing_ui();                // 停止共享的 UI 复位
+    void on_share_source_invalidated(const QString& reason);   // 源失效提示
 
     // 画廊布局
     struct VideoTile {
@@ -166,6 +181,9 @@ private:
 
     // ── 媒体引擎 ─────────────────────────────────────────
     MediaEngine* media_engine_ = nullptr;
+
+    // ── 屏幕共享浮动工具条（#23，共享期间显示）────────────
+    FloatingShareToolbar* share_toolbar_ = nullptr;
 
     // ── 桌面/移动检测 ────────────────────────────────────
     static constexpr int kMobileWidth = 768;

@@ -3,8 +3,30 @@
 #include <cstddef>
 #include <vector>
 #include <cassert>
+#include <thread>
+
+// x86 平台自旋退避指令：pause 可降低流水线功耗并避免内存序违规惩罚
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#  include <immintrin.h>
+#  define WEMEET_HAS_PAUSE 1
+#endif
 
 namespace wemeet {
+
+/**
+ * @brief 自旋等待退避（#7）
+ *
+ *  x86/x64: _mm_pause()（MSVC 与 GCC/Clang 均由 immintrin.h 提供；
+ *           GCC 下等价于 __builtin_ia32_pause()）
+ *  其他平台: std::this_thread::yield() 兜底，让出时间片避免空转
+ */
+inline void cpu_relax() {
+#if defined(WEMEET_HAS_PAUSE)
+    _mm_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
 
 /**
  * @brief 无锁 SPSC（单生产者-单消费者）定长环形队列
@@ -47,8 +69,7 @@ public:
     // 入队（自旋等待，生产者独占，不会死锁）
     void push(const T& item) {
         while (!try_push(item)) {
-            // 自旋等待消费者消费
-            // 生产环境中可加入 _mm_pause() 降低 CPU 功耗
+            cpu_relax();   // 自旋退避：降低 CPU 功耗与总线争抢
         }
     }
 
@@ -70,7 +91,7 @@ public:
     // 出队（自旋等待）
     void pop(T& item) {
         while (!try_pop(item)) {
-            // 自旋等待生产者写入
+            cpu_relax();   // 自旋退避
         }
     }
 

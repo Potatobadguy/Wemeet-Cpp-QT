@@ -61,6 +61,15 @@ MainWindow::MainWindow(QWidget* parent)
     connect(media_engine_, &MediaEngine::network_quality_changed,
             this, &MainWindow::on_network_quality_changed);
 
+    // 媒体引擎通过信令通道向服务器发送统计/控制消息
+    connect(media_engine_, &MediaEngine::signaling_message,
+            this, [this](const QByteArray& data) {
+        if (network_ && network_->is_connected()) {
+            network_->send_message(std::string(data.constData(),
+                                               static_cast<size_t>(data.size())));
+        }
+    });
+
     // 初始状态
     server_status_label_->setText("● 未连接");
     server_status_label_->setStyleSheet(
@@ -98,7 +107,7 @@ void MainWindow::setup_ui() {
     subtitle_label->setAlignment(Qt::AlignCenter);
 
     QString btn_style =
-        "QPushButton { color: white; padding: 14px 36px; "
+        "QPushButton { color: white; padding: 14px 36px; min-height: 48px; "
         "border-radius: 10px; font-size: 15px; font-weight: bold; min-width: 200px; }";
 
     create_meeting_btn_ = new QPushButton("[+] 创建会议");
@@ -561,6 +570,39 @@ void MainWindow::process_incoming_message(const std::string& data) {
         }
         break;
     }
+    case wemeet::MSG_BANDWIDTH_HINT: {
+        // 服务端基于丢包率/RTT 下发的带宽调整建议
+        wemeet::BandwidthHint hint;
+        if (hint.ParseFromString(base.payload())) {
+            qDebug("MainWindow: bandwidth hint -> %u kbps (min=%u, reason=%s)",
+                   hint.max_bitrate_kbps(), hint.min_bitrate_kbps(),
+                   hint.reason().c_str());
+            if (media_engine_ && hint.max_bitrate_kbps() > 0) {
+                // 应用服务端建议的上行码率上限
+                media_engine_->apply_bandwidth_hint(hint.max_bitrate_kbps());
+            }
+        }
+        break;
+    }
+    case wemeet::MSG_MEDIA_CONTROL: {
+        // #20：远端屏幕共享暂停/恢复广播（服务端 MediaControl SCREEN 房间广播）
+        // 约定：mute=true → 暂停共享，mute=false → 恢复共享
+        wemeet::MediaControl ctrl;
+        if (ctrl.ParseFromString(base.payload()) &&
+            ctrl.media_type() == wemeet::MediaControl::SCREEN && in_meeting_) {
+            bool paused = ctrl.mute();
+            // self 守卫：共享者自身也会收到服务端直接回传的 fwd
+            // （signaling_server.cpp:743 send_to_user(target_user_id)），
+            // 跳过自身，避免在自己的 tile 上显示「对方已暂停共享」提示。
+            if (ctrl.target_user_id() != current_user_id_) {
+                // 路由到当前会议页：在共享者对应 tile 上叠加/解除「对方已暂停共享」
+                meeting_page_->on_remote_share_paused(ctrl.target_user_id(), paused);
+                qDebug("MainWindow: remote screen share %s user=%llu",
+                       paused ? "PAUSED" : "RESUMED", ctrl.target_user_id());
+            }
+        }
+        break;
+    }
     default:
         break;
     }
@@ -721,12 +763,11 @@ void MainWindow::init_media_engine(uint64_t user_id, const QString& room_id,
         return;
     }
     media_engine_->register_media_relay(relay_host, relay_port);
-    media_engine_->start_microphone();   // 麦克风通常可共享
-    // 摄像头由 MediaEngine 内部自动尝试（独占时会失败并显示占位）
-    media_engine_->start_camera();
+    media_engine_->start_microphone();
 
-    // 向服务器注册媒体中继（让服务器知道我们的 UDP 地址）
-    // 视频
+    // ★ 先向服务器注册媒体中继（让服务器分配 ssrc），再启动摄像头
+    // 否则 start_camera 发出的首批帧 ssrc=0 会被中继以"unknown ssrc"丢弃
+    // ── 视频注册 ──
     {
         wemeet::MediaRelayRegister vreq;
         vreq.set_user_id(user_id);
@@ -738,7 +779,7 @@ void MainWindow::init_media_engine(uint64_t user_id, const QString& room_id,
             static_cast<int>(wemeet::MSG_MEDIA_RELAY_REGISTER),
             QDateTime::currentMSecsSinceEpoch(), vreq));
     }
-    // 音频
+    // ── 音频注册 ──
     {
         wemeet::MediaRelayRegister areq;
         areq.set_user_id(user_id);
@@ -750,4 +791,7 @@ void MainWindow::init_media_engine(uint64_t user_id, const QString& room_id,
             static_cast<int>(wemeet::MSG_MEDIA_RELAY_REGISTER),
             QDateTime::currentMSecsSinceEpoch(), areq));
     }
+
+    // ★ 注册请求发出后再启动摄像头（TCP 顺序保证响应会在少量 ms 内到达）
+    media_engine_->start_camera();
 }

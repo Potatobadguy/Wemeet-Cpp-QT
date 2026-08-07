@@ -11,6 +11,7 @@
 #include "signaling_server.h"
 #include "logger.h"
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <cstring>
 
@@ -60,7 +61,7 @@ int main(int argc, char* argv[]) {
                       << "  --db-host HOST    MySQL host (default: 127.0.0.1)\n"
                       << "  --db-port PORT    MySQL port (default: 3306)\n"
                       << "  --db-user USER    MySQL user (default: root)\n"
-                      << "  --db-pass PASS    MySQL password\n"
+                      << "  --db-pass PASS    MySQL password (or env WEMEET_DB_PASS; required)\n"
                       << "  --db-name NAME    MySQL database (default: wemeet)\n"
                       << "  --help, -h        Show this help\n";
             return 0;
@@ -70,6 +71,23 @@ int main(int argc, char* argv[]) {
     // ── 初始化日志 ───────────────────────────────────────
     Logger::instance().set_level(LogLevel::INFO);
     Logger::instance().set_console(true);
+
+    // ── 数据库密码校验（#14）─────────────────────────────
+    // 优先级：命令行 --db-pass > 环境变量 WEMEET_DB_PASS；
+    // 两者均为空则拒绝启动（禁止硬编码默认密码上线）。
+    if (config.db_pass.empty()) {
+        const char* env_pass = std::getenv("WEMEET_DB_PASS");
+        if (env_pass && env_pass[0] != '\0') {
+            config.db_pass = env_pass;
+        }
+    }
+    if (config.db_pass.empty()) {
+        LOG_FATAL("Database password is empty. Provide it via --db-pass "
+                  "or the WEMEET_DB_PASS environment variable. Refusing to start.");
+        std::cerr << "[FATAL] 数据库密码为空：请通过 --db-pass 参数或 "
+                     "WEMEET_DB_PASS 环境变量提供，服务器拒绝启动。\n";
+        return 1;
+    }
 
     LOG_INFO("WeMeet Signaling Server v2.0.0");
     LOG_INFO("Listening on %s:%u", config.listen_ip.c_str(), config.listen_port);

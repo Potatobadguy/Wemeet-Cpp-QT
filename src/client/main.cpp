@@ -17,8 +17,9 @@
 // 内嵌明亮主题样式
 static const char* kLightTheme = R"(
 QMainWindow, QDialog, QWidget { background-color: #f0f4f8; color: #333333; }
-QPushButton { background-color: #4A90D9; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 500; }
+QPushButton { background-color: #4A90D9; color: white; border: none; border-radius: 8px; padding: 10px 20px; min-height: 36px; font-weight: 500; }
 QPushButton:hover { background-color: #357ABD; }
+QPushButton:pressed { background-color: #2A5F9E; }
 QLineEdit, QTextEdit { background-color: #ffffff; color: #333333; border: 1px solid #d0d0d0; border-radius: 8px; padding: 8px; }
 QLineEdit:focus { border-color: #4A90D9; }
 QListWidget { background-color: #ffffff; border: 1px solid #d0d0d0; border-radius: 8px; }

@@ -44,6 +44,12 @@ public:
     void set_console(bool enable);
 
     // ── 日志接口 ─────────────────────────────────────────
+    // format(printf, 6, 7)：成员函数隐含 this 占第 1 参，故 fmt 为第 6 参、
+    // 可变参数从第 7 参开始；GCC/Clang 编译期校验格式串与实参类型匹配（#16）。
+    // 所有 LOG_* 调用点的格式告警应当作错误处理。
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 6, 7)))
+#endif
     void log(LogLevel level, const char* file, int line,
              const char* func, const char* fmt, ...);
 

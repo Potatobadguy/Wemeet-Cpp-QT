@@ -1,6 +1,8 @@
 #include "meeting_room.h"
 #include "media_engine.h"
 #include "rtp_session.h"
+#include "share_source_dialog.h"   // 共享源选择对话框（#19）
+#include "share_toolbar.h"         // 浮动共享工具条（#23）
 #include <algorithm>
 #include <QSplitter>
 #include <QScrollArea>
@@ -25,6 +27,12 @@ MeetingRoom::MeetingRoom(QWidget* parent)
 }
 
 MeetingRoom::~MeetingRoom() {
+    // 浮动工具条为无父顶级窗口，需手动销毁
+    if (share_toolbar_) {
+        share_toolbar_->close();
+        delete share_toolbar_;
+        share_toolbar_ = nullptr;
+    }
     if (media_engine_) {
         media_engine_->shutdown();
     }
@@ -88,39 +96,45 @@ void MeetingRoom::setup_ui() {
     bar_layout->setSpacing(12);
 
     QString btn_base =
-        "QPushButton { padding: 10px 20px; border-radius: 8px; font-size: 13px; "
+        "QPushButton { padding: 0px 20px; border-radius: 8px; font-size: 13px; "
         "color: white; border: none; min-width: 80px; font-weight: bold; }";
 
     mute_btn_ = new QPushButton("MIC 静音");
     mute_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                               "QPushButton:hover { background: #555; }");
     mute_btn_->setCursor(Qt::PointingHandCursor);
+    mute_btn_->setFixedHeight(44);
 
     video_btn_ = new QPushButton("CAM 摄像头");
     video_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                "QPushButton:hover { background: #555; }");
     video_btn_->setCursor(Qt::PointingHandCursor);
+    video_btn_->setFixedHeight(44);
 
     share_btn_ = new QPushButton("SCR 共享");
     share_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                "QPushButton:hover { background: #555; }");
     share_btn_->setCursor(Qt::PointingHandCursor);
+    share_btn_->setFixedHeight(44);
 
     members_btn_ = new QPushButton("USR 成员");
     members_btn_->setStyleSheet(btn_base + "QPushButton { background: #444; }"
                                  "QPushButton:hover { background: #555; }");
     members_btn_->setCursor(Qt::PointingHandCursor);
+    members_btn_->setFixedHeight(44);
 
     back_btn_ = new QPushButton("<- 返回");
     back_btn_->setToolTip("返回大厅");
     back_btn_->setStyleSheet(btn_base + "QPushButton { background: #666; }"
                               "QPushButton:hover { background: #555; }");
     back_btn_->setCursor(Qt::PointingHandCursor);
+    back_btn_->setFixedHeight(44);
 
     hangup_btn_ = new QPushButton("END 挂断");
     hangup_btn_->setStyleSheet(btn_base + "QPushButton { background: #E74C3C; }"
                                 "QPushButton:hover { background: #C0392B; }");
     hangup_btn_->setCursor(Qt::PointingHandCursor);
+    hangup_btn_->setFixedHeight(44);
 
     bar_layout->addWidget(mute_btn_);
 
@@ -299,7 +313,6 @@ void MeetingRoom::set_room_info(const QString& room_id, const QString& title,
             chat_input_->setFocus();
             chat_input_->setEnabled(true);
             chat_input_->setReadOnly(false);
-            qDebug("MeetingRoom: chat_input focused");
         }
     });
 }
@@ -326,6 +339,33 @@ void MeetingRoom::set_media_engine(MediaEngine* engine) {
         if (tile && tile->video_widget) {
             tile->video_widget->present_frame(frame);
         }
+    });
+
+    // ── 屏幕共享信号（#20/#23/#24）──
+    // 共享停止（含异常停止）→ 复位按钮 + 隐藏工具条
+    connect(media_engine_, &MediaEngine::screen_share_stopped,
+            this, [this]() {
+        if (sharing_) stop_sharing_ui();
+    });
+
+    // 共享（重新）开始 → 工具条恢复"正在共享"（覆盖源失效后重选场景）
+    connect(media_engine_, &MediaEngine::screen_share_started,
+            this, [this]() {
+        if (sharing_ && share_toolbar_) {
+            share_toolbar_->set_state(ShareState::Sharing);
+        }
+    });
+
+    // #24：共享源失效（窗口被关闭等）→ 提示用户重新选择
+    connect(media_engine_, &MediaEngine::share_source_invalidated,
+            this, &MeetingRoom::on_share_source_invalidated);
+
+    // 本地暂停/恢复 → 同步工具条状态
+    connect(media_engine_, &MediaEngine::screen_share_paused, this, [this]() {
+        if (share_toolbar_) share_toolbar_->set_state(ShareState::Paused);
+    });
+    connect(media_engine_, &MediaEngine::screen_share_resumed, this, [this]() {
+        if (share_toolbar_) share_toolbar_->set_state(ShareState::Sharing);
     });
 }
 
@@ -367,26 +407,27 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
     tile.avatar_label->setStyleSheet("color: #4A90D9; font-size: 36px; font-weight: bold;"
                                       "background: transparent;");
 
-    // 视频控件（本地用 QVideoWidget / 远端用 RemoteVideoWidget）
+    // 视频控件（本地/远端都使用 RemoteVideoWidget：present_frame 统一接入）
     if (is_local) {
-        tile.video_widget = nullptr;
+        auto* local_video = new RemoteVideoWidget();
+        local_video->setStyleSheet("background: black; border-radius: 10px;");
+        local_video->setMinimumSize(200, 150);
+        tile.video_widget = local_video;
         inner->addWidget(video_container, 1);
-        video_layout->addWidget(tile.avatar_label);
-
-        // 摄像头可用时创建本地预览控件
-        if (media_engine_ && media_engine_->camera_active()) {
-            auto* local_video = new QVideoWidget();
-            local_video->setStyleSheet("background: black; border-radius: 10px;");
-            local_video->setMinimumSize(200, 150);
-            video_layout->addWidget(local_video);
+        video_layout->addWidget(local_video);
+        if (media_engine_) {
             media_engine_->set_local_preview(local_video);
+        }
+        // 再放头像（叠加在视频上，无视频流时显示占位）
+        video_layout->addWidget(tile.avatar_label);
+        if (media_engine_ && media_engine_->camera_active()) {
             tile.avatar_label->setVisible(false);
         } else {
-            // 摄像头不可用（独占 / 无设备）— 增强占位
+            // 摄像头不可用 — 头像叠加显示"无视频"占位
             tile.avatar_label->setStyleSheet(
-                "color: #E67E22; font-size: 32px; font-weight: bold;"
-                "background: transparent;");
-            tile.avatar_label->setText(nickname.mid(0, 1).toUpper() + "\n\n(无视频)");
+                "color: rgba(255,255,255,0.85); font-size: 28px; font-weight: bold;"
+                "background: rgba(0,0,0,0.45); border-radius: 12px; padding: 12px 24px;");
+            tile.avatar_label->setText(nickname.mid(0, 1).toUpper() + "\n(无视频)");
             tile.avatar_label->setToolTip(
                 media_engine_ && !media_engine_->camera_active()
                     ? "摄像头被其他应用占用或不可用"
@@ -558,6 +599,14 @@ void MeetingRoom::on_mute_toggled() {
 
 void MeetingRoom::on_video_toggled() {
     video_off_ = !video_off_;
+
+    // ★ 反向互斥：正要开启摄像头但屏幕共享正在进行 → 先关闭共享
+    if (!video_off_ && sharing_) {
+        media_engine_->stop_screen_share();
+        stop_sharing_ui();   // 统一复位按钮 + 隐藏浮动工具条
+        emit screen_share_toggled(false);
+    }
+
     video_btn_->setText(video_off_ ? "CAM 已关闭" : "CAM 摄像头");
     video_btn_->setStyleSheet(video_off_
         ? "QPushButton { background: #E74C3C; color: white; padding: 10px 20px; "
@@ -589,40 +638,118 @@ void MeetingRoom::on_share_toggled() {
     if (!media_engine_) return;
 
     if (sharing_) {
-        // 停止共享
+        // 停止共享（工具条/按钮复位由 stop_sharing_ui 统一处理）
         media_engine_->stop_screen_share();
-        share_btn_->setText("SCR 共享");
-        share_btn_->setStyleSheet(
-            "QPushButton { background: #444; color: white; padding: 10px 20px; "
-            "border-radius: 8px; font-weight: bold; }");
-        sharing_ = false;
+        stop_sharing_ui();
     } else {
-        // 选择屏幕开始共享
-        QList<QScreen*> screens = QGuiApplication::screens();
-        if (screens.isEmpty()) return;
-
-        int screen_idx = 0;
-        if (screens.size() > 1) {
-            QStringList items;
-            for (int i = 0; i < screens.size(); ++i) {
-                auto* s = screens[i];
-                items << QString("屏幕 %1: %2x%3").arg(i).arg(s->size().width()).arg(s->size().height());
-            }
-            bool ok;
-            QString item = QInputDialog::getItem(this, "选择共享屏幕", "屏幕:", items, 0, false, &ok);
-            if (!ok) return;
-            screen_idx = items.indexOf(item);
-            if (screen_idx < 0) return;
-        }
-
-        media_engine_->start_screen_share(screen_idx);
-        share_btn_->setText("⏹ 停止共享");
-        share_btn_->setStyleSheet(
-            "QPushButton { background: #E67E22; color: white; padding: 10px 20px; "
-            "border-radius: 8px; font-weight: bold; }");
-        sharing_ = true;
+        // #19：弹出共享源选择对话框（屏幕 / 应用窗口 双 Tab）
+        show_share_dialog();
     }
     emit screen_share_toggled(sharing_);
+}
+
+/**
+ * @brief 弹出共享源选择对话框（#19）
+ *
+ * 双 Tab（整个屏幕 / 应用窗口）+ 3 列缩略图网格 + 双击直接开始。
+ * accept 后取 selected_source() 启动共享并显示浮动工具条。
+ */
+void MeetingRoom::show_share_dialog() {
+    ShareSourceDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    start_sharing_with(dialog.selected_source());
+}
+
+void MeetingRoom::start_sharing_with(const ShareSource& source) {
+    // ★ 屏幕共享与摄像头互斥：开启共享时关闭摄像头
+    if (!video_off_ && media_engine_->camera_active()) {
+        media_engine_->stop_camera();       // 彻底停止采集（Qt + V4L2 均生效）
+        video_off_ = true;
+        video_btn_->setText("CAM 已关闭");
+        video_btn_->setStyleSheet(
+            "QPushButton { background: #E67E22; color: white; "
+            "border-radius: 8px; font-weight: bold; "
+            "padding: 0px 20px; font-size: 13px; min-width: 80px; }");
+    }
+
+    if (!media_engine_->start_screen_share(source)) {
+        QMessageBox::warning(this, QStringLiteral("无法共享"),
+                             QStringLiteral("所选共享源不可用，请重新选择。"));
+        return;
+    }
+
+    share_btn_->setText("⏹ 停止共享");
+    share_btn_->setStyleSheet(
+        "QPushButton { background: #E67E22; color: white; "
+        "border-radius: 8px; font-weight: bold; "
+        "padding: 0px 20px; font-size: 13px; min-width: 80px; }");
+    sharing_ = true;
+
+    // #23：显示浮动工具条（暂停/恢复/停止）
+    if (!share_toolbar_) {
+        share_toolbar_ = new FloatingShareToolbar();   // 顶级悬浮窗，无父对象
+        connect(share_toolbar_, &FloatingShareToolbar::pause_clicked,
+                this, [this]() { media_engine_->pause_screen_share(); });
+        connect(share_toolbar_, &FloatingShareToolbar::resume_clicked,
+                this, [this]() { media_engine_->resume_screen_share(); });
+        connect(share_toolbar_, &FloatingShareToolbar::stop_clicked,
+                this, [this]() {
+            if (!sharing_) return;
+            media_engine_->stop_screen_share();
+            stop_sharing_ui();
+            emit screen_share_toggled(false);
+        });
+    }
+    share_toolbar_->set_state(ShareState::Sharing);
+    share_toolbar_->show();
+}
+
+/**
+ * @brief 停止共享的 UI 复位（按钮文案 + 隐藏工具条）
+ */
+void MeetingRoom::stop_sharing_ui() {
+    sharing_ = false;
+    share_btn_->setText("SCR 共享");
+    share_btn_->setStyleSheet(
+        "QPushButton { background: #444; color: white; "
+        "border-radius: 8px; font-weight: bold; "
+        "padding: 0px 20px; font-size: 13px; min-width: 80px; }");
+    if (share_toolbar_) {
+        share_toolbar_->hide();
+    }
+}
+
+/**
+ * @brief 共享源失效处理（#24）：提示用户重新选择源
+ */
+void MeetingRoom::on_share_source_invalidated(const QString& reason) {
+    if (!sharing_) return;
+
+    if (share_toolbar_) share_toolbar_->set_state(ShareState::Paused);
+
+    auto ret = QMessageBox::question(
+        this, QStringLiteral("共享源已失效"),
+        reason + QStringLiteral("\n\n是否重新选择共享内容？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+    if (ret == QMessageBox::Yes) {
+        show_share_dialog();   // 重新弹源选择对话框（原共享已被置为暂停态）
+    } else {
+        media_engine_->stop_screen_share();
+        stop_sharing_ui();
+        emit screen_share_toggled(false);
+    }
+}
+
+/**
+ * @brief 远端共享暂停/恢复叠加提示（#20 观看端）
+ */
+void MeetingRoom::on_remote_share_paused(uint64_t user_id, bool paused) {
+    auto* tile = find_tile(user_id);
+    if (tile && tile->video_widget) {
+        tile->video_widget->set_share_paused_hint(paused);
+    }
 }
 
 void MeetingRoom::on_volume_level_changed(double level) {

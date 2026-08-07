@@ -24,6 +24,7 @@ EventLoop::EventLoop()
     }
 
     // 注册 wakeup fd
+    // 注意：此时 loop 尚未运行（running_ == false），add_read_event 走直接路径
     add_read_event(wakeup_fd_, [this]() {
         uint64_t val;
         ::read(wakeup_fd_, &val, sizeof(val));
@@ -58,7 +59,7 @@ void EventLoop::loop() {
             break;
         }
 
-        // 处理就绪事件
+        // 处理就绪事件（仅 loop 线程：fd 回调表/定时器表均无锁访问，#6）
         for (int i = 0; i < ready; ++i) {
             int fd = events_[i].data.fd;
             uint32_t ev = events_[i].events;
@@ -85,27 +86,20 @@ void EventLoop::loop() {
                 handle_timer(fd);
             }
 
-            // 可读事件
+            // 可读事件（无锁读回调表 — 仅本线程访问）
             if (ev & EPOLLIN) {
-                // 普通 fd 的回调（连接等）
-                ReadCallback cb;
-                {
-                    std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
-                    auto it = fd_read_callbacks_.find(fd);
-                    if (it != fd_read_callbacks_.end()) cb = it->second;
+                auto it = fd_read_callbacks_.find(fd);
+                if (it != fd_read_callbacks_.end() && it->second) {
+                    it->second();
                 }
-                if (cb) cb();
             }
 
-            // 可写事件
+            // 可写事件（同表回调）
             if (ev & EPOLLOUT) {
-                ReadCallback cb;
-                {
-                    std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
-                    auto it = fd_read_callbacks_.find(fd);
-                    if (it != fd_read_callbacks_.end()) cb = it->second;
+                auto it = fd_read_callbacks_.find(fd);
+                if (it != fd_read_callbacks_.end() && it->second) {
+                    it->second();
                 }
-                if (cb) cb();
             }
         }
     }
@@ -120,27 +114,42 @@ void EventLoop::quit() {
 }
 
 // ── IO 事件管理 ──────────────────────────────────────────
+// 线程模型（#6）：loop 运行中且非 loop 线程 → run_in_loop 投递；
+// loop 线程内或 loop 未运行（构造期注册）→ 直接执行。
+
 void EventLoop::add_read_event(int fd, ReadCallback cb) {
-    {
-        std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
-        fd_read_callbacks_[fd] = std::move(cb);
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, fd, cb = std::move(cb)]() mutable {
+            add_read_event(fd, std::move(cb));
+        });
+        return;
     }
+    fd_read_callbacks_[fd] = std::move(cb);
     update_channel(fd, EPOLLIN | EPOLLET);
 }
 
 void EventLoop::enable_write(int fd) {
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, fd]() { enable_write(fd); });
+        return;
+    }
     update_channel(fd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void EventLoop::disable_write(int fd) {
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, fd]() { disable_write(fd); });
+        return;
+    }
     update_channel(fd, EPOLLIN | EPOLLET);
 }
 
 void EventLoop::remove_fd(int fd) {
-    {
-        std::lock_guard<std::mutex> lock(fd_callbacks_mutex_);
-        fd_read_callbacks_.erase(fd);
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, fd]() { remove_fd(fd); });
+        return;
     }
+    fd_read_callbacks_.erase(fd);
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 
@@ -158,25 +167,57 @@ void EventLoop::update_channel(int fd, uint32_t events) {
 
 // ── 定时器 ───────────────────────────────────────────────
 int EventLoop::run_after(int64_t delay_ms, TimerCallback cb) {
+    // timer_id 在调用线程先行分配（原子），保证跨线程调用也能同步返回 id
+    int id = next_timer_id_.fetch_add(1, std::memory_order_relaxed);
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, id, delay_ms, cb = std::move(cb)]() mutable {
+            create_timer(id, delay_ms, false, std::move(cb));
+        });
+        return id;
+    }
+    return create_timer(id, delay_ms, false, std::move(cb));
+}
+
+int EventLoop::run_every(int64_t interval_ms, TimerCallback cb) {
+    int id = next_timer_id_.fetch_add(1, std::memory_order_relaxed);
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, id, interval_ms, cb = std::move(cb)]() mutable {
+            create_timer(id, interval_ms, true, std::move(cb));
+        });
+        return id;
+    }
+    return create_timer(id, interval_ms, true, std::move(cb));
+}
+
+/**
+ * @brief 定时器创建（仅 loop 线程 / loop 未运行时）
+ *
+ * timerfd_create + timerfd_settime + 注册 epoll，同时维护
+ * timers_（fd → entry）与 timer_id_to_fd_（id → fd）两张表。
+ */
+int EventLoop::create_timer(int id, int64_t interval_ms, bool repeat, TimerCallback cb) {
     int timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (timer_fd < 0) return -1;
 
-    // 设置定时器参数
     struct itimerspec its{};
-    its.it_value.tv_sec  = delay_ms / 1000;
-    its.it_value.tv_nsec = (delay_ms % 1000) * 1000000;
-    // it_interval 为 0 → 一次性定时器
+    its.it_value.tv_sec  = interval_ms / 1000;
+    its.it_value.tv_nsec = (interval_ms % 1000) * 1000000;
+    if (repeat) {
+        its.it_interval.tv_sec  = interval_ms / 1000;
+        its.it_interval.tv_nsec = (interval_ms % 1000) * 1000000;
+    }
 
     ::timerfd_settime(timer_fd, 0, &its, nullptr);
 
-    int id = next_timer_id_++;
     auto entry = std::make_unique<TimerEntry>();
-    entry->fd       = timer_fd;
-    entry->callback = std::move(cb);
-    entry->repeat   = false;
-    entry->interval_ms = 0;
+    entry->id          = id;
+    entry->fd          = timer_fd;
+    entry->callback    = std::move(cb);
+    entry->repeat      = repeat;
+    entry->interval_ms = repeat ? interval_ms : 0;
 
     timers_[timer_fd] = std::move(entry);
+    timer_id_to_fd_[id] = timer_fd;   // #8：id → fd 映射，cancel_timer 用
 
     // 注册到 epoll
     update_channel(timer_fd, EPOLLIN | EPOLLET);
@@ -184,33 +225,28 @@ int EventLoop::run_after(int64_t delay_ms, TimerCallback cb) {
     return id;
 }
 
-int EventLoop::run_every(int64_t interval_ms, TimerCallback cb) {
-    int timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (timer_fd < 0) return -1;
+/**
+ * @brief 取消定时器（#8 完整实现）
+ *
+ * 在 loop 线程内执行（跨线程自动投递）：
+ *  1. timer_id_to_fd_ 查到 timerfd；
+ *  2. epoll_ctl DEL 摘除监听；
+ *  3. close(fd) 释放 timerfd（不泄漏）；
+ *  4. 清除 timers_ 与 timer_id_to_fd_ 两表 —— 回调不再触发。
+ */
+void EventLoop::cancel_timer(int timer_id) {
+    if (is_running() && !is_in_loop_thread()) {
+        run_in_loop([this, timer_id]() { cancel_timer(timer_id); });
+        return;
+    }
+    auto id_it = timer_id_to_fd_.find(timer_id);
+    if (id_it == timer_id_to_fd_.end()) return;   // 不存在/已取消：幂等
 
-    struct itimerspec its{};
-    its.it_value.tv_sec     = interval_ms / 1000;
-    its.it_value.tv_nsec    = (interval_ms % 1000) * 1000000;
-    its.it_interval.tv_sec  = interval_ms / 1000;
-    its.it_interval.tv_nsec = (interval_ms % 1000) * 1000000;
-
-    ::timerfd_settime(timer_fd, 0, &its, nullptr);
-
-    int id = next_timer_id_++;
-    auto entry = std::make_unique<TimerEntry>();
-    entry->fd       = timer_fd;
-    entry->callback = std::move(cb);
-    entry->repeat   = true;
-    entry->interval_ms = interval_ms;
-
-    timers_[timer_fd] = std::move(entry);
-    update_channel(timer_fd, EPOLLIN | EPOLLET);
-
-    return id;
-}
-
-void EventLoop::cancel_timer(int /*timer_id*/) {
-    // 简化实现：暂不按 id 取消
+    int timer_fd = id_it->second;
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, timer_fd, nullptr);
+    ::close(timer_fd);
+    timers_.erase(timer_fd);
+    timer_id_to_fd_.erase(id_it);
 }
 
 void EventLoop::handle_timer(int timer_fd) {
@@ -226,9 +262,10 @@ void EventLoop::handle_timer(int timer_fd) {
         it->second->callback();
     }
 
-    // 一次性定时器 → 清理
+    // 一次性定时器 → 清理（同步清除 id 映射，#8）
     if (!it->second->repeat) {
-        remove_fd(timer_fd);
+        timer_id_to_fd_.erase(it->second->id);
+        ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, timer_fd, nullptr);
         ::close(timer_fd);
         timers_.erase(it);
     }

@@ -51,14 +51,11 @@ void NetworkClient::send_message(const std::string& data) {
             return;
         }
         send_queue_.enqueue(packet);
-        qDebug("NetworkClient: queued message (%zu B), queue size=%d",
-               data.size(), send_queue_.size());
         return;
     }
 
     socket_->write(packet);
     socket_->flush();
-    qDebug("NetworkClient: sent %zu B", data.size());
 }
 
 // ── 槽函数 ───────────────────────────────────────────────
@@ -75,7 +72,6 @@ void NetworkClient::on_connected() {
     }
     if (flushed > 0) {
         socket_->flush();
-        qDebug("NetworkClient: flushed %d queued message(s)", flushed);
     }
 
     emit connected();
@@ -93,9 +89,6 @@ void NetworkClient::on_disconnected() {
 
 void NetworkClient::on_ready_read() {
     QByteArray incoming = socket_->readAll();
-    if (incoming.size() > 0) {
-        qDebug("NetworkClient: RECV %d bytes from server (raw)", incoming.size());
-    }
     recv_buffer_.append(incoming);
 
     // 处理粘包: 4字节长度头
@@ -115,7 +108,6 @@ void NetworkClient::on_ready_read() {
         QByteArray body = recv_buffer_.mid(4, body_len);
         recv_buffer_.remove(0, 4 + body_len);
 
-        qDebug("NetworkClient: emitting message_received (%d B body)", body.size());
         emit message_received(body.toStdString());
     }
 }

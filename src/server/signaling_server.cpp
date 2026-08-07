@@ -749,6 +749,17 @@ void SignalingServer::handle_media_control(
     } else if (req.media_type() == MediaControl::VIDEO) {
         media_relay_->update_media_status(req.target_user_id(), req.room_id(),
                                            true, !req.mute());
+    } else if (req.media_type() == MediaControl::SCREEN) {
+        // 屏幕共享冻结标志（#20）：mute=true=暂停共享，false=恢复。
+        // 除回执给操作者外，还需广播给房间内其他参与者（排除发送者），
+        // 让所有观看端叠加/解除「对方已暂停共享」提示。
+        auto bcast_buf = Codec::encode_wrapped(
+            static_cast<int>(MsgType::MSG_MEDIA_CONTROL), seq_id, fwd);
+        broadcast_to_room(req.room_id(), req.target_user_id(), std::move(bcast_buf));
+
+        LOG_INFO("Screen share %s broadcast: user=%lu room=%s",
+                 req.mute() ? "PAUSED" : "RESUMED",
+                 req.target_user_id(), req.room_id().c_str());
     }
 
     MediaControlAck ack;
