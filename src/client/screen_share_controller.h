@@ -113,4 +113,5 @@ private:
     // 静止降帧阈值
     static constexpr int kStaticThreshold = 3;      // 连续 ≥3 帧静止 → 1fps
     static constexpr int kStaticIntervalMs = 1000;  // 心跳帧间隔
+    static constexpr int kHeartbeatSendEvery = 5;   // 静止心跳每 5 次强制重发一帧（约 5s），供远端自愈
 };

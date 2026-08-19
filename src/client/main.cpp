@@ -11,8 +11,16 @@
 #include <QPoint>
 #include <QRect>
 #include <QScreen>
+#include <QSettings>
 #include "main_window.h"
 #include "login_dialog.h"
+
+// ── 调试便利：自动登录凭据（QSettings 持久化）────────────
+// 仅本地调试用，明文保存便于跳过登录流程；生产环境请改用 token。
+static const QString kSettingsAutoLogin = "AutoLogin";
+static const QString kSettingsEmail     = "AutoLogin/email";
+static const QString kSettingsPassword  = "AutoLogin/password";
+static const QString kSettingsRemember  = "AutoLogin/remember_password";
 
 // 内嵌明亮主题样式
 static const char* kLightTheme = R"(
@@ -73,7 +81,8 @@ static void centerOnPrimaryScreen(QWidget* w) {
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
-    app.setApplicationName("WeMeet");
+    QCoreApplication::setOrganizationName("WeMeet");  // QSettings 定位持久化文件需要
+    QCoreApplication::setApplicationName("WeMeet");
     app.setApplicationVersion("1.0.0");
 
     setupCjkFont();
@@ -92,9 +101,19 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(&login_dialog, &LoginDialog::login_request,
                      [&main_window, &login_dialog](const QString& email, const QString& password) {
+        // 凭据持久化（调试便利）：始终保留 email；仅在勾选"记住密码"时保存密码
+        QSettings settings;
+        settings.setValue(kSettingsEmail, email);
+        settings.setValue(kSettingsRemember, login_dialog.login_remember_pass_
+                                                  ? login_dialog.login_remember_pass_->isChecked()
+                                                  : false);
+        if (login_dialog.login_remember_pass_ && login_dialog.login_remember_pass_->isChecked()) {
+            settings.setValue(kSettingsPassword, password);
+        } else {
+            settings.remove(kSettingsPassword);
+        }
         // 主窗口负责向服务器发送 LOGIN_REQ 并接收响应
         main_window.login_via_server(email, password);
-        // 主窗口认证成功后会自动回调 on_login_success 并关闭此对话框
     });
 
     QObject::connect(&login_dialog, &LoginDialog::register_request,
@@ -120,8 +139,15 @@ int main(int argc, char* argv[]) {
 
     // 主窗口认证失败的信号 -> 显示错误
     QObject::connect(&main_window, &MainWindow::auth_failed,
-                     [&login_dialog](const QString& error_msg) {
+                     [&main_window, &login_dialog](const QString& error_msg) {
         login_dialog.show_error(error_msg);
+        // 自动登录失败（凭据失效/服务器重启）→ 重新显示登录对话框让用户手动登录
+        if (!login_dialog.isVisible()) {
+            centerOnPrimaryScreen(&login_dialog);
+            login_dialog.show();
+            login_dialog.raise();
+            login_dialog.activateWindow();
+        }
     });
 
     // 主窗口注册响应的信号 -> 显示消息
@@ -139,6 +165,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ── 调试便利：读出上次保存的账号/密码填到登录界面（不自动登录） ──
+    // 勾选"记住密码"只意味着下次仍弹登录界面但凭据已填好，需用户手动点登录
+    QSettings settings;
+    const QString saved_email = settings.value(kSettingsEmail).toString();
+    const QString saved_pass  = settings.value(kSettingsPassword).toString();
+    const bool    saved_remember = settings.value(kSettingsRemember, false).toBool();
+    if (!saved_email.isEmpty()) {
+        login_dialog.prefill_credentials(saved_email, saved_pass, saved_remember);
+        qDebug("Prefilled saved credentials for %s (remember=%d)",
+               qPrintable(saved_email), saved_remember ? 1 : 0);
+    }
+
+    // 始终弹登录界面，由用户手动点登录（即便勾选了"记住密码"也不自动登录）
     if (login_dialog.exec() == QDialog::Accepted) {
         return app.exec();
     }

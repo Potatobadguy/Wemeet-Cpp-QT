@@ -5,6 +5,9 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QListWidgetItem>
+#include <QPainter>
+#include <QColor>
+#include <QFont>
 
 ShareSourceDialog::ShareSourceDialog(QWidget* parent)
     : QDialog(parent) {
@@ -82,15 +85,45 @@ void ShareSourceDialog::populate_screens() {
     const QList<QScreen*> screens = QGuiApplication::screens();
     for (int i = 0; i < screens.size(); ++i) {
         QScreen* s = screens[i];
-        // 屏幕缩略图：grabWindow(0, geometry) 抓取该屏当前内容
-        QPixmap shot = s->grabWindow(0).scaled(
+        // WSLg/部分合成器下 grabWindow(0) 可能返回空 pixmap 或全黑 pixmap
+        QPixmap shot = s->grabWindow(0);
+
+        // ★ 检测"全黑 pixmap"：取一个 4x4 缩略图计算平均亮度，若接近全黑
+        //    视为抓取失败（WSLg Wayland 抓屏返回的非空但全黑的 pixmap）
+        bool capture_failed = shot.isNull();
+        if (!capture_failed) {
+            QPixmap probe = shot.scaled(4, 4, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            QImage img = probe.toImage().convertToFormat(QImage::Format_RGB32);
+            quint64 sum = 0;
+            for (int y = 0; y < img.height(); ++y) {
+                const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+                for (int x = 0; x < img.width(); ++x) sum += qGray(line[x]);
+            }
+            int pixels = img.width() * img.height();
+            int avg = pixels > 0 ? static_cast<int>(sum / pixels) : 0;
+            // 平均亮度 < 10 视为抓取失败（全黑或接近全黑）
+            capture_failed = (avg < 10);
+        }
+
+        if (capture_failed) {
+            // 兜底：构造一个带文字占位的灰色 pixmap（替代黑色块）
+            shot = QPixmap(s->size().width(), s->size().height());
+            shot.fill(QColor(40, 50, 70));
+            QPainter p(&shot);
+            p.setPen(QColor(180, 180, 200));
+            p.setFont(QFont("Microsoft YaHei", 24, QFont::Bold));
+            p.drawText(shot.rect(), Qt::AlignCenter,
+                       QStringLiteral("屏幕 %1\n（缩略图不可用）").arg(i + 1));
+            p.end();
+        }
+        QPixmap thumb = shot.scaled(
             kThumbSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
         QString title = QStringLiteral("屏幕 %1 (%2×%3)")
                             .arg(i + 1)
                             .arg(s->size().width())
                             .arg(s->size().height());
-        auto* item = new QListWidgetItem(QIcon(shot), title, screen_list_);
+        auto* item = new QListWidgetItem(QIcon(thumb), title, screen_list_);
         item->setData(Qt::UserRole, i);   // screen_index
         item->setTextAlignment(Qt::AlignHCenter);
         screen_list_->addItem(item);

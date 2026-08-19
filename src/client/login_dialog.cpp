@@ -132,6 +132,13 @@ void LoginDialog::setup_login_tab(QWidget* tab) {
     login_pass_->setMinimumHeight(46);
     layout->addRow(pass_label, login_pass_);
 
+    // ── 记住密码复选框（与登录按钮同行）──
+    login_remember_pass_ = new QCheckBox("记住密码");
+    login_remember_pass_->setStyleSheet(
+        "QCheckBox { color: #555555; font-size: 13px; background: transparent; }"
+        "QCheckBox::indicator { width: 16px; height: 16px; }");
+    layout->addRow(login_remember_pass_);
+
     login_status_ = new QLabel("");
     login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
                                  "background: transparent; }");
@@ -254,6 +261,13 @@ void LoginDialog::show_error(const QString& msg) {
     login_status_->setStyleSheet("QLabel { color: #E74C3C; font-size: 13px; "
                                  "background: transparent; }");
     login_status_->show();
+}
+
+void LoginDialog::prefill_credentials(const QString& email, const QString& password,
+                                       bool remember_password) {
+    if (login_email_) login_email_->setText(email);
+    if (login_pass_)  login_pass_->setText(password);
+    if (login_remember_pass_) login_remember_pass_->setChecked(remember_password);
 }
 
 void LoginDialog::show_register_result(bool success, const QString& msg) {

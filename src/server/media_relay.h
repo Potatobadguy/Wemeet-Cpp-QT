@@ -44,6 +44,7 @@ struct RTPStreamInfo {
     std::atomic<uint64_t> packets_sent{0};
     std::atomic<uint64_t> packets_received{0};
     std::atomic<uint64_t> bytes_sent{0};
+    std::atomic<uint64_t> bytes_received{0};   // 本流从客户端收到的字节数（relay 转发路径累计）
     std::atomic<double> packet_loss_rate{0.0};
     std::atomic<double> rtt_ms{0.0};
 

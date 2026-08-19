@@ -577,19 +577,42 @@ void MediaEngine::send_screen_control(bool mute) {
 void MediaEngine::on_share_frame(const QImage& frame, int jpeg_quality) {
     if (frame.isNull()) return;
 
+    // ── 抓取有效性检测：WSLg/Wayland 下 grabWindow 会返回"非空但全黑"的 pixmap ──
+    //   对小尺寸缩略图采样平均亮度，< 10 视为抓取失败
+    bool frame_valid = true;
+    {
+        QPixmap probe = QPixmap::fromImage(frame).scaled(
+            4, 4, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        QImage img = probe.toImage().convertToFormat(QImage::Format_RGB32);
+        quint64 sum = 0;
+        for (int y = 0; y < img.height(); ++y) {
+            const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+            for (int x = 0; x < img.width(); ++x) sum += qGray(line[x]);
+        }
+        int pixels = img.width() * img.height();
+        int avg = pixels > 0 ? static_cast<int>(sum / pixels) : 0;
+        if (avg < 10) frame_valid = false;
+    }
+
+    if (!frame_valid) {
+        // 全黑帧：跳过本地预览与发送（避免反复画全黑、浪费带宽）
+        static std::atomic<uint64_t> invalid_count{0};
+        uint64_t n = invalid_count.fetch_add(1);
+        if (n == 0 || n % 50 == 0) {
+            qWarning("MediaEngine: screen share frame is all-black (WSLg Wayland portal may be needed) #%llu",
+                     n + 1);
+        }
+        return;
+    }
+
     // ── 本地预览 ──
     if (local_preview_widget_) {
-        QImage img = frame.convertToFormat(QImage::Format_ARGB32);
-        QVideoFrameFormat vff(QSize(img.width(), img.height()),
-                              QVideoFrameFormat::Format_ARGB8888);
-        QVideoFrame vf(vff);
-        if (vf.map(QVideoFrame::WriteOnly)) {
-            std::memcpy(vf.bits(0), img.constBits(),
-                        static_cast<size_t>(img.sizeInBytes()));
-            vf.unmap();
-            local_preview_widget_->present_frame(vf);
-        }
+        QVideoFrame vf(frame);
+        local_preview_widget_->present_frame(vf);
     }
+
+    // ── 编码发送 ──
+    if (relay_host_.isNull() || !rtp_session_->is_bound()) return;
 
     // ── 编码发送 ──
     if (relay_host_.isNull() || !rtp_session_->is_bound()) return;
@@ -663,6 +686,17 @@ void MediaEngine::remove_remote_video_widget(uint64_t user_id) {
     }
 }
 
+void MediaEngine::clear_remote_video_widgets() {
+    for (auto& rs : remote_streams_) {
+        if (rs.widget) {
+            rs.widget->setParent(nullptr);
+            rs.widget->deleteLater();
+            rs.widget = nullptr;
+        }
+    }
+    remote_streams_.clear();
+}
+
 RemoteVideoWidget* MediaEngine::get_remote_widget(uint64_t user_id) const {
     for (auto& rs : remote_streams_) {
         if (rs.user_id == user_id) return rs.widget;
@@ -709,6 +743,13 @@ uint32_t MediaEngine::current_bandwidth() const {
 
 void MediaEngine::apply_bandwidth_hint(uint32_t max_bitrate_kbps) {
     if (!rtp_session_) return;
+
+    // 节降：相同值不重复打印 / 不重复设置（避免高频 hint 反复刷屏与潜在写竞争）
+    static std::atomic<uint32_t> last_applied{0};
+    uint32_t prev = last_applied.load(std::memory_order_acquire);
+    if (prev == max_bitrate_kbps) return;
+    last_applied.store(max_bitrate_kbps, std::memory_order_release);
+
     rtp_session_->set_max_bitrate(max_bitrate_kbps);
     // 同步给本地带宽估计器，保证后续 stats 上报与建议一致
     bandwidth_estimator_->report_bitrate(max_bitrate_kbps);
@@ -750,9 +791,14 @@ void MediaEngine::register_media_relay(const QString& relay_host, uint16_t relay
 
 void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                                           const QHostAddress& /*src*/, uint16_t /*port*/) {
-    // 放入抖动缓冲（保留重排序与丢包统计）
+    // 放入抖动缓冲（保留丢包统计；注意：JitterBuffer 为全局单队列，不区分 SSRC/PT，
+    // 若在此 pop 排序会导致不同媒体流（video/audio/screen 各自独立 seq）混排错乱，
+    // 因此处理仍走原始到达顺序，由 FrameAssembler 内部对乱序/缺包做健壮处理）
     jitter_buffer_->push_packet(packet);
+    process_rtp_packet(packet);
+}
 
+void MediaEngine::process_rtp_packet(const RTPPacket& packet) {
     uint8_t pt = packet.payload_type();
     uint16_t seq = packet.sequence();
     uint32_t ts  = packet.timestamp_val();
@@ -775,23 +821,25 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
             fa.last_update.start();
             frame_assemblers_[ssrc] = std::move(fa);
         } else {
-            // 追加分片；若发现中间缺包，尝试用 FEC 冗余还原后补入
-            while (it->second.expected_next_seq != seq) {
-                uint16_t missing = it->second.expected_next_seq;
-                QByteArray recovered;
-                if (rtp_session_->recover_fec(missing, recovered)) {
-                    it->second.jpeg_data.append(recovered);
-                    // 补偿成功：记录丢包但补回数据，避免花屏
-                    it->second.lost_compensated++;
-                } else {
-                    // 无法还原，跳过该缺失分片，继续推进期望序号
-                    it->second.missing_packets++;
-                }
-                it->second.expected_next_seq = static_cast<uint16_t>(missing + 1);
+            // 追加分片；先处理乱序/重复包（seq 回退或等于已处理序号 → 丢弃）
+            if (seq < it->second.expected_next_seq) {
+                // 乱序/重复包：序号已处理过，直接丢弃，避免死循环与数据错乱
+                return;
             }
-            it->second.jpeg_data.append(packet.payload);
-            it->second.expected_next_seq = static_cast<uint16_t>(seq + 1);
-            it->second.last_update.restart();
+            if (seq > it->second.expected_next_seq) {
+                // 中间缺包：本实现 FEC 恢复不可靠（recover_fec 返回的是 XOR 冗余而非原始数据），
+                // 若继续拼接会导致 JPEG 数据错位 → 解码失败 → 黑屏。
+                // 正确策略：标记本帧损坏，停止追加数据，等待 marker 到达后整体丢弃；
+                // 下一帧（关键帧）会重新从首片开始组装，避免黑屏残影。
+                it->second.missing_packets += static_cast<uint32_t>(seq - it->second.expected_next_seq);
+                it->second.active = false;
+                it->second.expected_next_seq = static_cast<uint16_t>(seq + 1);
+            } else {
+                // 序号连续：正常追加
+                it->second.jpeg_data.append(packet.payload);
+                it->second.expected_next_seq = static_cast<uint16_t>(seq + 1);
+                it->second.last_update.restart();
+            }
         }
 
         // 标记位 = 1 表示这是该帧的最后一个分片
@@ -799,11 +847,12 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
             auto fa_it = frame_assemblers_.find(ssrc);
             if (fa_it != frame_assemblers_.end()) {
                 QByteArray jpeg = fa_it->second.jpeg_data;
+                bool complete = fa_it->second.active && fa_it->second.missing_packets == 0;
                 frame_assemblers_.erase(fa_it);
 
                 // 用 QImage::loadFromData 解码 JPEG
                 QImage img;
-                if (img.loadFromData(jpeg, "JPEG") && !img.isNull()) {
+                if (complete && img.loadFromData(jpeg, "JPEG") && !img.isNull()) {
                     QVideoFrame frame(img);
                     // 找到对应的远端 widget（优先按精确 ssrc 匹配）
                     RemoteVideoWidget* target_widget = nullptr;
@@ -828,9 +877,14 @@ void MediaEngine::on_rtp_packet_received(const RTPPacket& packet,
                     }
                     if (target_widget) {
                         target_widget->present_frame(frame);
-                        emit remote_video_frame(target_uid, frame);
+                        // ★ 安全：emit 之前显式构造拷贝，避免栈对象跨信号连接
+                        // （若接收方在跨线程 direct connection 中访问原 frame，
+                        //   槽函数返回后 frame 析构 → use-after-free → segfault）
+                        QVideoFrame frame_copy = frame;
+                        emit remote_video_frame(target_uid, frame_copy);
                     }
                 }
+                // 不完整/解码失败的帧：整体丢弃，等待下一关键帧（避免黑屏残影）
             }
         }
 

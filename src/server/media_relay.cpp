@@ -301,10 +301,21 @@ bool MediaRelay::register_participant(
         uint16_t& out_relay_port) {
 
     out_relay_host = bind_ip_;
-    // 根据 media_type 分配到不同端口（audio→0, video→1），
-    // 让不同媒体流落在不同中继线程上并行处理
-    int relay_idx = (media_type == "audio") ? 0 :
-                    (media_type == "video") ? 1 % worker_threads_ : 0;
+    // 根据 media_type 分配到不同端口：
+    //   audio → 0 号端口；video → 1 号端口；screen → 独立 2 号端口（若线程数足够），
+    //   线程数不足时回退到 video 端口（1 号），避免 screen 与 audio 混用同一线程端口。
+    //   注意：v2.1 早期实现把 screen 落入 else 分支（idx=0=audio 端口），
+    //   若客户端注册 screen 流会导致与音频争用同一端口、丢包/乱序 → 黑屏。
+    int relay_idx;
+    if (media_type == "audio") {
+        relay_idx = 0;
+    } else if (media_type == "video") {
+        relay_idx = 1 % worker_threads_;
+    } else if (media_type == "screen") {
+        relay_idx = (worker_threads_ >= 3) ? 2 : (1 % worker_threads_);
+    } else {
+        relay_idx = 0;
+    }
     out_relay_port = base_port_ + static_cast<uint16_t>(relay_idx);
 
     std::lock_guard<std::mutex> lock(rooms_mutex_);

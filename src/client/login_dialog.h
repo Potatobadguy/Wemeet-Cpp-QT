@@ -3,6 +3,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
+#include <QCheckBox>
 #include <QVBoxLayout>
 #include <QTabWidget>
 #include <QMouseEvent>
@@ -18,6 +19,10 @@ public:
 
     void show_error(const QString& msg);
     void show_register_result(bool success, const QString& msg);
+
+    // 调试便利：填充上次保存的凭据并可选勾选"记住密码"
+    void prefill_credentials(const QString& email, const QString& password,
+                            bool remember_password);
 
 signals:
     void login_request(const QString& email, const QString& password);
@@ -40,8 +45,11 @@ private:
     void setup_register_tab(QWidget* tab);
 
     // ── 登录字段 ──
+public:
     QLineEdit* login_email_ = nullptr;
     QLineEdit* login_pass_  = nullptr;
+    QCheckBox* login_remember_pass_ = nullptr;   // 记住密码
+private:
     QPushButton* login_btn_ = nullptr;
     QLabel*     login_status_ = nullptr;
 

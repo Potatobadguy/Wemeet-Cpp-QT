@@ -85,9 +85,13 @@ void MeetingRoom::setup_ui() {
                                     "QScrollBar::handle:vertical { background: #4A90D9; border-radius: 3px; }");
 
     gallery_container_ = new QWidget();
+    // ★ 让容器能水平/垂直铺满滚动区，tile 才能自适应铺满
+    gallery_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     gallery_layout_ = new QGridLayout(gallery_container_);
     gallery_layout_->setSpacing(12);
+    gallery_layout_->setContentsMargins(8, 8, 8, 8);
     gallery_scroll_->setWidget(gallery_container_);
+    gallery_scroll_->setWidgetResizable(true);
     left_layout->addWidget(gallery_scroll_, 1);
 
     // 控制栏
@@ -288,13 +292,30 @@ void MeetingRoom::set_room_info(const QString& room_id, const QString& title,
 
     room_title_->setText(title + "  [" + room_id + "]");
 
+    // ── 修复重叠：清掉旧的 tile frame 与 remote widget（防止上次会话残影留在画廊） ──
+    // 先删除所有 frame（含其内部子 widget）——frame 由 gallery_container_ 持有，
+    // 必须显式 delete 才能彻底销毁，避免下次入会后旧 widget 残留与新 widget 叠加
+    if (gallery_layout_) {
+        while (gallery_layout_->count() > 0) {
+            auto* item = gallery_layout_->takeAt(0);
+            if (item->widget()) {
+                gallery_layout_->removeWidget(item->widget());
+                item->widget()->deleteLater();
+            }
+            delete item;
+        }
+    }
+    if (media_engine_) {
+        media_engine_->clear_remote_video_widgets();
+    }
+    participants_.clear();
+
     // 进入会议室后自动聚焦到聊天输入框（方便用户立即发言）
     QTimer::singleShot(300, this, [this]() {
         if (chat_input_) chat_input_->setFocus();
     });
 
-    // 清理后重新填充
-    participants_.clear();
+    // 重新填充本地参与者
     bool local_video_on = media_engine_ && media_engine_->camera_active();
     add_participant(local_user_id, nickname, true, true, local_video_on, true);
 
@@ -391,13 +412,16 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
 
     tile.frame = new QFrame(gallery_container_);
     apply_tile_style(tile);
+    // ★ 修复大小：完全由 grid stretch 决定 tile 尺寸，不设 hard-coded min size
+    tile.frame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     auto* inner = new QVBoxLayout(tile.frame);
     inner->setContentsMargins(8, 8, 8, 8);
     inner->setSpacing(4);
 
-    // 视频/头像区
+    // 视频/头像区 — 与 tile 一起扩展
     auto* video_container = new QWidget();
+    video_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto* video_layout = new QStackedLayout(video_container);
     video_layout->setStackingMode(QStackedLayout::StackAll);
 
@@ -411,7 +435,8 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
     if (is_local) {
         auto* local_video = new RemoteVideoWidget();
         local_video->setStyleSheet("background: black; border-radius: 10px;");
-        local_video->setMinimumSize(200, 150);
+        // ★ 自适应：视频控件随 tile 一起扩展，不设固定最小尺寸
+        local_video->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         tile.video_widget = local_video;
         inner->addWidget(video_container, 1);
         video_layout->addWidget(local_video);
@@ -438,7 +463,7 @@ void MeetingRoom::add_participant(uint64_t user_id, const QString& nickname,
         tile.video_widget = nullptr;
         if (media_engine_) {
             tile.video_widget = media_engine_->create_remote_video_widget(user_id, video_container);
-            tile.video_widget->setMinimumSize(200, 150);
+            tile.video_widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             tile.video_widget->set_video_on(video_on);
             tile.video_widget->set_placeholder_text(nickname);
             video_layout->addWidget(tile.avatar_label);
@@ -841,11 +866,10 @@ void MeetingRoom::on_participant_context_menu(uint64_t user_id) {
 // ── 画廊布局 ────────────────────────────────────────────────
 
 void MeetingRoom::rebuild_gallery() {
-    // 清空
+    // 清空布局项（旧 frame 由 gallery_container_ 持有，下次 addWidget 时会再次复用）
     while (gallery_layout_->count() > 0) {
         auto* item = gallery_layout_->takeAt(0);
         if (item->widget()) {
-            item->widget()->hide();
             gallery_layout_->removeWidget(item->widget());
         }
         delete item;
@@ -855,12 +879,27 @@ void MeetingRoom::rebuild_gallery() {
     if (count == 0) return;
 
     int cols = gallery_columns();
+    int rows = (count + cols - 1) / cols;
+
+    // ★ 正确设置列/行 stretch：按整行整列统一设置权重，所有列均分、所有行均分
+    for (int c = 0; c < cols; ++c) gallery_layout_->setColumnStretch(c, 1);
+    for (int r = 0; r < rows; ++r) gallery_layout_->setRowStretch(r, 1);
+
     for (int i = 0; i < count; ++i) {
         int row = i / cols;
         int col = i % cols;
-        gallery_layout_->addWidget(participants_[i].frame, row, col);
-        participants_[i].frame->show();
+        auto* frame = participants_[i].frame;
+        if (!frame) continue;
+        // 保留 frame 但显式 hide，等 addWidget 后再 show，避免旧 tile 残影叠加
+        frame->hide();
+        gallery_layout_->addWidget(frame, row, col);
+        frame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        frame->updateGeometry();
+        frame->show();
     }
+
+    // 强制整行/列按 stretch 重新分配，让 tile 铺满画廊
+    gallery_layout_->activate();
 
     update_member_list();
 }
@@ -885,7 +924,7 @@ void MeetingRoom::apply_tile_style(VideoTile& tile) {
     tile.frame->setStyleSheet(
         "QFrame { background: #16213e; border: 2px solid #333; border-radius: 12px; }"
         "QFrame:hover { border-color: #4A90D9; }");
-    tile.frame->setMinimumSize(200, 160);
+    // 不再设 setMinimumSize — 大小由 grid stretch 决定，避免 tile 缩成小方块
 }
 
 void MeetingRoom::rebuild_member_list() {

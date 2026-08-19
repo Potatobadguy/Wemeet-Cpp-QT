@@ -319,17 +319,12 @@ void RtpSession::parse_fec_packet(const RTPPacket& pkt) {
     fec_cache_[start_seq] = std::move(rec);
 }
 
-bool RtpSession::recover_fec(uint16_t lost_seq, QByteArray& data) {
-    // 找到覆盖 lost_seq 的 FEC 记录
-    for (auto& [start, rec] : fec_cache_) {
-        if (lost_seq >= rec.start_seq && lost_seq <= rec.end_seq) {
-            // XOR 数据即为该组的冗余，这里还原逻辑依赖上层补齐组内另一包。
-            // 简化方案：将冗余数据直接作为还原结果（对两包 XOR 场景，
-            // 若上层已缓存组内另一包，可再 XOR；此处返回原始冗余供上层判断）。
-            data = rec.xor_data;
-            return true;
-        }
-    }
+bool RtpSession::recover_fec(uint16_t /*lost_seq*/, QByteArray& /*data*/) {
+    // 说明：当前实现的"FEC"仅用两帧首分片做 XOR 冗余，无法据此还原中间丢失的分片。
+    // 旧实现直接把 XOR 冗余数据当作恢复出的原始数据返回，会把错误字节拼入 JPEG 流，
+    // 导致解码失败 → 黑屏。因此这里明确禁用 FEC 恢复：
+    //  - 丢包由上层 FrameAssembler 以"丢弃本帧、等待下一关键帧"的策略处理；
+    //  - 冗余包仍会解析缓存（见 parse_fec_packet），仅保留统计意义。
     return false;
 }
 

@@ -526,6 +526,76 @@ MediaRelay[1] port=10001 received  654 bytes from 127.0.0.1:yyyyy
 - 有日志 → 发送端正常，问题在接收端
 - 无日志 → 发送端没发 UDP 包（摄像头没捕获到帧）
 
+### WSL2 挂载摄像头（usbipd-win 直通）
+
+> WSL2 默认无法直接访问 USB 设备（包括摄像头）。通过微软官方的 **usbipd-win** 工具，可以把 Windows 的 USB 摄像头"直通"到 WSL2，映射为 `/dev/video*`，项目即可用 V4L2 直接采集。
+
+#### 0. 前置条件
+- 必须是 **WSL2**（不是 WSL1），确认方法：
+  ```powershell
+  wsl --list --verbose   # VERSION 列必须是 2
+  ```
+- Windows 上已安装 **usbipd-win**（管理员 PowerShell）：
+  ```powershell
+  winget install usbipd
+  ```
+
+#### 1. 查看 USB 设备，找到摄像头 busid（Windows PowerShell 管理员）
+
+```powershell
+usbipd list
+```
+输出类似（`DEVICE` 列含 Camera/Webcam 的即为摄像头）：
+```
+BUSID  VID:PID   DEVICE                                    STATE
+2-1    046d:0825 Logitech HD Pro Webcam C920               Not attached
+```
+
+#### 2. 绑定（共享）设备
+
+```powershell
+usbipd bind --busid 2-1 --force
+```
+
+#### 3. 挂载到 WSL2（建议指定发行版）
+
+```powershell
+usbipd attach --wsl --busid 2-1 --distribution Ubuntu
+# 若只有一个发行版，可省略 --distribution
+```
+
+attach 成功后，Windows 侧设备状态会从 `Shared` 变为 `Attached`。
+
+#### 4. 回到 WSL2 验证设备出现
+
+```bash
+ls -l /dev/video*      # 期望看到 /dev/video0 或 /dev/video1
+```
+
+若不存在，强制加载 UVC 内核模块再看：
+
+```bash
+sudo modprobe uvcvideo
+sudo dmesg | tail -n 20   # 查看 uvcvideo 相关内核日志
+```
+
+#### 5. 用 v4l2 工具确认格式（可选）
+
+```bash
+sudo apt install v4l2-utils
+v4l2-ctl --list-devices
+v4l2-ctl --device=/dev/video0 --list-formats   # 应看到 YUYV / MJPEG 等格式
+```
+
+#### 常见坑 & 排查
+
+| 现象 | 原因 / 解法 |
+|------|------------|
+| `usbipd attach` 报 `already attached` | 有残留的 WSL 客户端占着设备。Windows 侧先 `usbipd detach --busid 2-1`，必要时 `wsl --terminate Ubuntu` 后再重新 attach |
+| 已 attach 但 `/dev/video*` 仍不存在 | 缺 `uvcvideo` 模块：`sudo modprobe uvcvideo` |
+| 打开摄像头黑屏 | WSLg 下 Qt Multimedia 常找不到设备，项目已改为 **V4L2 优先**，只要 `/dev/video0` 可读就有画面 |
+| 无物理摄像头，仅想验证视频管线 | 见下方「方案 A：V4L2 Loopback 虚拟摄像头」 |
+
 ### WSL2 客户端窗口不显示
 - Win11 + WSL2 自带 WSLg，直接运行即可
 - 确认 WSL 版本：`wsl --version`（需要 2.x+）
@@ -541,18 +611,3 @@ MediaRelay[1] port=10001 received  654 bytes from 127.0.0.1:yyyyy
 | Protobuf 协议 | 4 文件 | 5 文件（media.proto） | 5 文件 |
 | 服务端模块 | 信令 + DB | 信令 + DB + SFU 媒体中继 | + **SSRC 索引 / 随机化 / 包校验** |
 | 客户端模块 | UI + 网络 | UI + 网络 + 媒体引擎 + RTP | + **共享源选择 / 暂停恢复 / 质量自适应** |
-
-## 简历描述
-
-> **WeMeet — 企业级高性能视频会议系统** (C++17 | Qt6 | epoll | Protobuf | MySQL | WebRTC)
->
-> - 基于 **Reactor + One Loop Per Thread** 架构实现信令服务器，epoll ET 边缘触发支持 C10K 并发，Protobuf 二进制协议降低序列化开销
-> - 实现 **SFU 媒体中继**，多线程 UDP RTP/RTCP 接收，选择性转发支持多路高清视频并发；**SSRC 哈希索引**将每包反查从 O(N) 降为 O(1)
-> - 设计**自适应带宽估计算法**（丢包率 + RTT 双因子），弱网环境自动从 2.5 Mbps 降至 300 Kbps，抗丢包率 15%+
-> - 实现 **JitterBuffer + FEC 纠错**，200ms 抖动缓冲 + 异或奇偶校验，显著降低网络抖动影响
-> - 基于 **Qt Multimedia** 实现摄像头/麦克风采集，**屏幕共享完整闭环**（源选择对话框、帧差检测降帧、质量自适应、暂停/恢复、浮动工具条）
-> - 集成**三级 TLS 内存池**(8KB/64KB/1MB) + 无锁 SPSC 队列，音视频帧零拷贝传递；EventLoop 回调表无锁化，`_mm_pause` 自旋退避
-> - 构建 Qt6 跨平台桌面客户端，响应式 UI 自适应桌面/移动端，QSS 全局暗色主题
-> - 全量 **RAII + 智能指针** 管理生命周期，CMake 模块化构建，Valgrind/ASan 验证零泄漏
->
-> 📄 **完整简历成品（可直投）**：见 [`RESUME.md`](./RESUME.md) —— 含技术栈映射表、难点与解决方案、Phase 1–5 技术路线、可量化成果、中英文简历文案与面试追问预案。

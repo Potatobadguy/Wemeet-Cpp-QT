@@ -105,7 +105,16 @@ void ScreenShareController::on_capture_tick() {
     }
 
     QImage frame = capture_frame();
-    if (frame.isNull()) return;   // 抓取失败（如权限/合成器问题），本 tick 跳过
+    if (frame.isNull()) {
+        // capture_frame 内部已打印警告；这里不再重复，避免刷屏
+        static std::atomic<uint64_t> null_skip{0};
+        uint64_t s = null_skip.fetch_add(1);
+        if (s % 25 == 0) {
+            qDebug("ScreenShareController: on_capture_tick skipped %llu ticks due to empty frame",
+                   static_cast<unsigned long long>(s + 1));
+        }
+        return;
+    }
 
     // #22：帧差检测 —— 整帧 memcmp
     if (frames_identical(frame, prev_frame_)) {
@@ -115,7 +124,13 @@ void ScreenShareController::on_capture_tick() {
             static_mode_ = true;
             capture_timer_.setInterval(kStaticIntervalMs);
         }
-        return;   // 画面无变化，不发送
+        // 静止模式下的 1fps 心跳：仍强制重发当前帧（关键帧），
+        // 让远端在首帧/中途丢包后能够自愈，避免永久黑屏。
+        if (static_mode_ && static_frames_ % kHeartbeatSendEvery == 0) {
+            prev_frame_ = frame;
+            emit frame_ready(frame, tier_params(current_tier_).jpeg_quality);
+        }
+        return;   // 画面无变化，不按正常帧率发送
     }
 
     // 画面有变化 → 恢复正常帧率并发送
@@ -137,6 +152,10 @@ QImage ScreenShareController::capture_frame() {
         QScreen* screen = QGuiApplication::primaryScreen();
         if (!screen) return QImage();
         pixmap = screen->grabWindow(static_cast<WId>(source_.window_id));
+        if (pixmap.isNull()) {
+            // WSLg/部分合成器上 grabWindow(WId) 也失败，尝试回退到整屏
+            pixmap = screen->grabWindow(0);
+        }
     } else {
         // 整屏抓取：按 geometry 限定到选中屏（多屏正确性）
         const auto screens = QGuiApplication::screens();
@@ -144,14 +163,42 @@ QImage ScreenShareController::capture_frame() {
             source_.screen_index >= screens.size()) return QImage();
         QScreen* screen = screens[source_.screen_index];
         const QRect geom = screen->geometry();
+
+        // ── 多策略抓取：WSLg 下 grabWindow(0, x, y, w, h) 常返回空 ──
+        // 策略 1：按 geometry 限定（首选，多屏正确）
         pixmap = screen->grabWindow(0, geom.x(), geom.y(),
                                     geom.width(), geom.height());
-        if (pixmap.isNull()) {
-            pixmap = screen->grabWindow(0);   // 降级：全屏抓取
+        // 策略 2：不带几何的全屏抓取
+        if (pixmap.isNull() || pixmap.width() == 0 || pixmap.height() == 0) {
+            pixmap = screen->grabWindow(0);
+        }
+        // 策略 3：主屏兜底
+        if (pixmap.isNull() || pixmap.width() == 0 || pixmap.height() == 0) {
+            if (auto* primary = QGuiApplication::primaryScreen()) {
+                pixmap = primary->grabWindow(0);
+            }
+        }
+        // 抓到全桌面但只想选中屏 → 按 geom 裁剪
+        if (!pixmap.isNull() &&
+            (pixmap.width() > geom.width() || pixmap.height() > geom.height())) {
+            if (geom.x() + geom.width()  <= pixmap.width() &&
+                geom.y() + geom.height() <= pixmap.height()) {
+                pixmap = pixmap.copy(geom);
+            }
         }
     }
 
-    if (pixmap.isNull()) return QImage();
+    if (pixmap.isNull() || pixmap.width() == 0 || pixmap.height() == 0) {
+        // 抓取彻底失败（如 WSLg 平台限制）：每 25 次打一条警告
+        static std::atomic<uint64_t> empty_count{0};
+        uint64_t e = empty_count.fetch_add(1);
+        if (e == 0 || e % 25 == 0) {
+            qWarning("ScreenShareController: capture_frame returned empty pixmap #%llu "
+                     "(Wayland/WSLg portal may be needed)",
+                     static_cast<unsigned long long>(e + 1));
+        }
+        return QImage();
+    }
     return pixmap.toImage().convertToFormat(QImage::Format_RGB32);
 }
 

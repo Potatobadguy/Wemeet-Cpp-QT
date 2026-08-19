@@ -67,6 +67,7 @@ void TcpServer::handle_accept(Socket conn_sock, const sockaddr_in& peer_addr) {
 
     // 创建连接并注册回调
     auto conn = std::make_shared<TcpConnection>(io_loop, std::move(conn_sock), conn_id);
+    conn->set_peer_ip(ip_buf);   // 保存对端 IP，供媒体中继注册时作为客户端真实地址
 
     conn->set_message_callback(msg_cb_);
 

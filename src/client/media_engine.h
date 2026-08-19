@@ -125,6 +125,7 @@ public:
     // ── 远端媒体 ─────────────────────────────────────────
     RemoteVideoWidget* create_remote_video_widget(uint64_t user_id, QWidget* parent);
     void remove_remote_video_widget(uint64_t user_id);
+    void clear_remote_video_widgets();   // 清空所有远端 widget（切换/重进会议时调用）
     RemoteVideoWidget* get_remote_widget(uint64_t user_id) const;
 
     // ── 传输 ─────────────────────────────────────────────
@@ -175,6 +176,8 @@ signals:
 
 private slots:
     void on_rtp_packet_received(const RTPPacket& packet, const QHostAddress& src, uint16_t port);
+    // 处理单个 RTP 媒体包（先入 JitterBuffer 统计丢包，再按原始顺序交给 FrameAssembler）
+    void process_rtp_packet(const RTPPacket& packet);
     void on_bandwidth_estimated(uint32_t new_bitrate);
     void on_quality_changed(int32_t quality);
     void on_video_frame_captured(const QVideoFrame& frame);

@@ -321,9 +321,18 @@ void SignalingServer::on_message(
             uint32_t allocated_ssrc = 0;
             std::string relay_host;
             uint16_t relay_port = 0;
+            // ★ 修复：relay_host 字段语义是"客户端 UDP 接收地址"，但客户端往往上报的是
+            // 它连接的服务器地址（server_host_），若直接使用，跨机部署时服务端会把媒体包
+            // 转发到服务器自身，观看端收不到 → 黑屏。
+            // 正确做法：以 TCP 信令连接的对端 IP 作为客户端真实地址，客户端上报值仅用于
+            // 本机/同一网段兜底（对端 IP 为空时才回退）。
+            std::string client_host = req.relay_host();
+            if (!conn->peer_ip().empty() && conn->peer_ip() != "0.0.0.0") {
+                client_host = conn->peer_ip();
+            }
             bool ok = media_relay_->register_participant(
                 req.user_id(), req.room_id(), "user",
-                req.relay_host(), req.relay_port(),
+                client_host, req.relay_port(),
                 req.media_type(), allocated_ssrc, relay_host, relay_port);
             MediaRelayRegisterResp resp;
             resp.set_success(ok);
@@ -347,9 +356,11 @@ void SignalingServer::on_message(
             auto resp_buf = Codec::encode_wrapped(
                 static_cast<int>(MsgType::MSG_MEDIA_RELAY_REGISTER_RESP), seq_id, resp);
             conn->send(std::move(resp_buf));
-            LOG_INFO("MediaRelay: user=%lu room=%s type=%s ssrc=%u ok=%d peers=%d",
+            LOG_INFO("MediaRelay: user=%lu room=%s type=%s ssrc=%u ok=%d peers=%d "
+                     "(client_host=%s, reported=%s)",
                      req.user_id(), req.room_id().c_str(), req.media_type().c_str(),
-                     allocated_ssrc, ok ? 1 : 0, resp.peers_size());
+                     allocated_ssrc, ok ? 1 : 0, resp.peers_size(),
+                     client_host.c_str(), req.relay_host().c_str());
         }
         break;
     }
@@ -657,9 +668,15 @@ void SignalingServer::handle_media_relay_register(
     std::string relay_host;
     uint16_t relay_port = 0;
 
+    // ★ 修复：以 TCP 连接对端 IP 作为客户端真实地址（见 on_message 同名修复）
+    std::string client_host = req.relay_host();
+    if (!conn->peer_ip().empty() && conn->peer_ip() != "0.0.0.0") {
+        client_host = conn->peer_ip();
+    }
+
     bool ok = media_relay_->register_participant(
         req.user_id(), req.room_id(), "user",
-        req.relay_host(), req.relay_port(),
+        client_host, req.relay_port(),
         req.media_type(), allocated_ssrc, relay_host, relay_port);
 
     resp.set_success(ok);
