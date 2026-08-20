@@ -13,6 +13,8 @@ enum MsgType {
     MSG_REGISTER_REQ     = 102;
     MSG_REGISTER_RESP    = 103;
     MSG_LOGOUT_REQ       = 104;
+    MSG_AUTH_BY_ID_REQ   = 105;   // 免密码认证（Demo 用）
+    MSG_AUTH_BY_ID_RESP  = 106;
     // 心跳
     MSG_HEARTBEAT_REQ    = 200;
     MSG_HEARTBEAT_RESP   = 201;
@@ -37,6 +39,17 @@ enum MsgType {
     // 聊天
     MSG_CHAT_SEND       = 600;
     MSG_CHAT_RECEIVE    = 601;
+    // 媒体流控制
+    MSG_MEDIA_RELAY_REGISTER    = 700;
+    MSG_MEDIA_RELAY_REGISTER_RESP = 701;
+    MSG_MEDIA_STATS_REPORT      = 702;
+    MSG_BANDWIDTH_HINT          = 703;
+    MSG_MEDIA_CONTROL           = 704;
+    MSG_MEDIA_CONTROL_ACK       = 705;
+    MSG_SCREEN_SHARE_REQ        = 706;
+    MSG_SCREEN_SHARE_NOTIFY     = 707;
+    MSG_PARTICIPANT_ROLE        = 708;
+    MSG_NETWORK_QUALITY_REPORT  = 709;
     // 错误
     MSG_ERROR           = 999;
 }

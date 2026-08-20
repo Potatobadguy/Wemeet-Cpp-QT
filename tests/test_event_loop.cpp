@@ -89,7 +89,65 @@ static void test_run_in_loop() {
     PASS();
 }
 
-// ── 测试4：EventLoopPool ─────────────────────────────────
+// ── 测试4：cancel_timer — 取消后回调不再触发、timerfd 不泄漏（#8）──
+static void test_cancel_timer() {
+    TEST("cancel_timer (one-shot cancelled before fire)");
+
+    EventLoop loop;
+    std::atomic<int> fired{0};
+
+    std::thread t([&]() {
+        loop.loop();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 跨线程注册 + 立即取消（验证跨线程 run_in_loop 投递路径）
+    int id = loop.run_after(100, [&]() { fired.fetch_add(1); });
+    ASSERT(id > 0, "run_after should return a valid timer id");
+    loop.cancel_timer(id);
+
+    // 等待超过原定触发时间，回调不应执行
+    loop.run_after(300, [&]() { loop.quit(); });
+    t.join();
+
+    ASSERT(fired.load() == 0, "cancelled timer must not fire");
+    PASS();
+}
+
+// ── 测试5：cancel_timer 周期定时器中途取消 ───────────────
+static void test_cancel_periodic_timer() {
+    TEST("cancel_timer (periodic stopped mid-run)");
+
+    EventLoop loop;
+    std::atomic<int> count{0};
+
+    std::thread t([&]() {
+        loop.loop();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    int id = loop.run_every(50, [&]() { count.fetch_add(1); });
+    ASSERT(id > 0, "run_every should return a valid timer id");
+
+    // 让其触发若干次后取消
+    std::this_thread::sleep_for(std::chrono::milliseconds(220));
+    loop.cancel_timer(id);
+    int snapshot = count.load();
+    ASSERT(snapshot >= 2, "periodic timer should have fired before cancel");
+
+    // 取消后等待多个周期，计数不得再增长
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT(count.load() == snapshot, "no more fires after cancel");
+
+    // 重复取消应为幂等（不崩溃）
+    loop.cancel_timer(id);
+
+    loop.quit();
+    t.join();
+    PASS();
+}
+
+// ── 测试6：EventLoopPool ─────────────────────────────────
 static void test_pool() {
     TEST("EventLoopPool (One Loop Per Thread)");
 
@@ -125,6 +183,8 @@ int test_event_loop() {
     test_create_quit();
     test_timer();
     test_run_in_loop();
+    test_cancel_timer();
+    test_cancel_periodic_timer();
     test_pool();
 
     printf("\n  EventLoop: %d passed, %d failed\n\n", tests_passed, tests_failed);

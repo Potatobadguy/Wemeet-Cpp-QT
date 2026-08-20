@@ -7,6 +7,7 @@ add_executable(wemeet_server
     auth_service.cpp
     meeting_service.cpp
     user_manager.cpp
+    media_relay.cpp
 )
 
 target_link_libraries(wemeet_server PRIVATE

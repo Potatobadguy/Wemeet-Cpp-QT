@@ -30,18 +30,18 @@ void MemoryPool::deallocate(void* ptr, Tier tier) {
     tls_pool_.deallocate(ptr, tier, block_size);
 }
 
-// ── ThreadLocalPool 实现 ─────────────────────────────────
+// ── ThreadLocalPool 实现（侵入式 freelist）─────────────────
 void* MemoryPool::ThreadLocalPool::allocate(
         Tier tier, size_t block_size, std::atomic<uint64_t>& hits) {
 
-    auto& freelist = free_lists[static_cast<size_t>(tier)];
+    const size_t idx = static_cast<size_t>(tier);
 
-    // 优先从自由链表获取 → 池命中
-    if (!freelist.empty()) {
-        void* ptr = freelist.back();
-        freelist.pop_back();
+    // 优先从侵入式空闲链表摘取头节点 → 池命中（O(1)，无锁）
+    if (FreeNode* node = free_heads[idx]) {
+        free_heads[idx] = node->next;
+        --free_counts[idx];
         hits.fetch_add(1, std::memory_order_relaxed);
-        return ptr;
+        return static_cast<void*>(node);
     }
 
     // 池未命中 → 调用 malloc
@@ -51,23 +51,31 @@ void* MemoryPool::ThreadLocalPool::allocate(
 void MemoryPool::ThreadLocalPool::deallocate(
         void* ptr, Tier tier, size_t /*block_size*/) {
 
-    auto& freelist = free_lists[static_cast<size_t>(tier)];
+    const size_t idx = static_cast<size_t>(tier);
 
     // 限制池大小，超出则归还系统
-    if (freelist.size() < MemoryPool::kMaxBlocksPerTier) {
-        freelist.push_back(ptr);
+    if (free_counts[idx] < MemoryPool::kMaxBlocksPerTier) {
+        // 空闲块首部写入 next 指针（侵入式链接）
+        auto* node = static_cast<FreeNode*>(ptr);
+        node->next = free_heads[idx];
+        free_heads[idx] = node;
+        ++free_counts[idx];
     } else {
         std::free(ptr);
     }
 }
 
 MemoryPool::ThreadLocalPool::~ThreadLocalPool() {
-    // 线程退出时归还所有内存块
+    // 线程退出时遍历侵入式链表，归还所有内存块
     for (size_t t = 0; t < static_cast<size_t>(Tier::COUNT); ++t) {
-        for (void* ptr : free_lists[t]) {
-            std::free(ptr);
+        FreeNode* node = free_heads[t];
+        while (node) {
+            FreeNode* next = node->next;
+            std::free(static_cast<void*>(node));
+            node = next;
         }
-        free_lists[t].clear();
+        free_heads[t]  = nullptr;
+        free_counts[t] = 0;
     }
 }
 

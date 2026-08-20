@@ -1,0 +1,19 @@
+%% 4.1 RTP 转发路径（SSRC 索引，O(1)）
+sequenceDiagram
+    participant C as 客户端
+    participant RT as relay线程
+    participant IDX as ssrc_index_
+    participant R as RelayRoom
+    participant P as 其他参与者
+
+    C->>RT: RTP包(UDP)
+    RT->>RT: validate_rtp_packet() 非法→invalid_packets_++
+    RT->>IDX: shared_lock + find(ssrc) O(1)
+    IDX-->>RT: SsrcRoute{room, sender_id, media_type, stream}
+    RT->>RT: stream->packets_received++ 原子
+    RT->>R: lock(room->mutex)
+    loop 遍历 participants（跳过 sender）
+        RT->>RT: 查 streams[media_type].active
+        RT->>P: sendto(sock, buf, stream->client_addr_in)
+    end
+    RT->>R: unlock

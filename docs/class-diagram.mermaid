@@ -1,0 +1,155 @@
+classDiagram
+    %% ── 公共层 ──
+    class RTPHeader {
+        <<packed struct, common/rtp_header.h>>
+        +uint8_t cc_version
+        +uint8_t pt_marker
+        +uint16_t sequence_number
+        +uint32_t timestamp
+        +uint32_t ssrc
+        +payload_type() uint8_t
+        +sequence() uint16_t
+        +ssrc_val() uint32_t
+        +kHeaderSize$ size_t
+    }
+    class rtp_validate {
+        <<inline functions>>
+        +validate_rtp_packet(data, len)$ bool
+    }
+
+    %% ── 服务端中继 ──
+    class SsrcRoute {
+        +shared_ptr~RelayRoom~ room
+        +uint64_t sender_id
+        +string media_type
+        +shared_ptr~RTPStreamInfo~ stream
+    }
+    class RTPStreamInfo {
+        +uint32_t ssrc
+        +string media_type
+        +string client_host
+        +uint16_t client_port
+        +sockaddr_in client_addr_in
+        +atomic~uint64_t~ packets_sent
+        +atomic~uint64_t~ packets_received
+        +atomic~double~ packet_loss_rate
+        +atomic~bool~ active
+    }
+    class RelayParticipant {
+        +uint64_t user_id
+        +string nickname
+        +unordered_map streams
+    }
+    class RelayRoom {
+        +string room_id
+        +mutex mutex
+        +unordered_map participants
+    }
+    class MediaRelay {
+        -shared_mutex ssrc_index_mutex_
+        -unordered_map~uint32_t, SsrcRoute~ ssrc_index_
+        -mutex sockets_mutex_
+        -atomic~uint64_t~ fwd_seq_
+        -atomic~uint64_t~ unknown_ssrc_seq_
+        -atomic~uint64_t~ invalid_packets_
+        +register_participant(...) bool
+        +unregister_participant(user_id, room_id)
+        +report_stats(...)
+        +suggest_bitrate(user_id, room_id) uint32_t
+        +allocate_ssrc() uint32_t
+        -suggest_bitrate_unlocked(room, user_id) uint32_t
+        -allocate_ssrc_locked() uint32_t
+        -lookup_ssrc(ssrc, out_route) bool
+        -relay_thread_func(thread_id, port)
+    }
+
+    %% ── 网络层 ──
+    class EventLoop {
+        -map~int, ReadCallback~ fd_read_callbacks_
+        -map~int, unique_ptr~TimerEntry~~ timers_
+        -unordered_map~int,int~ timer_id_to_fd_
+        +add_read_event(fd, cb)
+        +remove_fd(fd)
+        +cancel_timer(timer_id)
+        +run_in_loop(task)
+    }
+
+    %% ── 客户端屏幕共享 ──
+    class ShareSource {
+        <<struct>>
+        +Type type
+        +int screen_index
+        +uintptr_t window_id
+        +QString title
+    }
+    class WindowInfo {
+        <<struct>>
+        +uintptr_t id
+        +QString title
+        +QIcon icon
+        +QPixmap thumbnail
+    }
+    class WindowEnumerator {
+        <<platform>>
+        +enumerate_windows()$ QList~WindowInfo~
+        +is_window_valid(id)$ bool
+        +is_window_minimized(id)$ bool
+    }
+    class ShareSourceDialog {
+        +selected_source() ShareSource
+        +source_selected(ShareSource) signal
+    }
+    class ScreenShareController {
+        +start(ShareSource)
+        +pause()
+        +resume()
+        +stop()
+        +state() ShareState
+        +frame_ready(QImage, int jpeg_quality) signal
+        +state_changed(ShareState) signal
+        +source_invalidated(QString reason) signal
+        +update_network_stats(double loss_rate)
+        -on_capture_tick()
+        -frames_identical(QImage, QImage) bool
+        -apply_tier(Tier)
+        -check_source_alive()
+    }
+    class FloatingShareToolbar {
+        +set_state(ShareState)
+        +pause_clicked() signal
+        +resume_clicked() signal
+        +stop_clicked() signal
+    }
+    class MediaEngine {
+        +start_screen_share(ShareSource)
+        +pause_screen_share()
+        +resume_screen_share()
+        +stop_screen_share()
+        -ScreenShareController* share_controller_
+        -on_share_frame(QImage, int)
+    }
+    class MeetingRoom {
+        -FloatingShareToolbar* share_toolbar_
+        -show_share_dialog()
+        -on_remote_share_paused(user_id, paused)
+    }
+    class RemoteVideoWidget {
+        +set_share_paused_hint(bool)
+    }
+
+    %% ── 关系 ──
+    MediaRelay "1" *-- "many" RelayRoom : rooms_
+    MediaRelay "1" *-- "many" SsrcRoute : ssrc_index_
+    RelayRoom "1" *-- "many" RelayParticipant
+    RelayParticipant "1" *-- "many" RTPStreamInfo
+    SsrcRoute --> RelayRoom
+    SsrcRoute --> RTPStreamInfo
+    MeetingRoom --> ShareSourceDialog : 弹出选择
+    MeetingRoom --> FloatingShareToolbar : 共享中显示
+    MeetingRoom --> MediaEngine : 委托
+    MediaEngine "1" *-- "1" ScreenShareController
+    ScreenShareController ..> ShareSource
+    ScreenShareController ..> WindowEnumerator : 源有效性检查
+    ShareSourceDialog ..> WindowEnumerator : 窗口列表
+    ShareSourceDialog ..> ShareSource : 产出
+    MediaEngine --> RemoteVideoWidget : 渲染远端

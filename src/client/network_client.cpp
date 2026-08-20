@@ -36,8 +36,6 @@ void NetworkClient::disconnect() {
 }
 
 void NetworkClient::send_message(const std::string& data) {
-    if (!is_connected()) return;
-
     // 4字节大端长度头 + Protobuf数据
     uint32_t len = static_cast<uint32_t>(data.size());
     uint32_t net_len = qToBigEndian(len);
@@ -45,6 +43,16 @@ void NetworkClient::send_message(const std::string& data) {
     QByteArray packet;
     packet.append(reinterpret_cast<const char*>(&net_len), 4);
     packet.append(data.data(), data.size());
+
+    if (!is_connected()) {
+        // 排队等连接成功后再发
+        if (send_queue_.size() >= kMaxQueueSize) {
+            qWarning("NetworkClient: send queue full, dropping message (%zu B)", data.size());
+            return;
+        }
+        send_queue_.enqueue(packet);
+        return;
+    }
 
     socket_->write(packet);
     socket_->flush();
@@ -54,6 +62,18 @@ void NetworkClient::send_message(const std::string& data) {
 void NetworkClient::on_connected() {
     reconnect_attempts_ = 0;
     qDebug() << "NetworkClient: connected to" << host_ << ":" << port_;
+
+    // 连接成功后刷新发送队列
+    int flushed = 0;
+    while (!send_queue_.isEmpty() && is_connected()) {
+        const QByteArray& packet = send_queue_.dequeue();
+        socket_->write(packet);
+        ++flushed;
+    }
+    if (flushed > 0) {
+        socket_->flush();
+    }
+
     emit connected();
 }
 
@@ -68,7 +88,8 @@ void NetworkClient::on_disconnected() {
 }
 
 void NetworkClient::on_ready_read() {
-    recv_buffer_.append(socket_->readAll());
+    QByteArray incoming = socket_->readAll();
+    recv_buffer_.append(incoming);
 
     // 处理粘包: 4字节长度头
     while (recv_buffer_.size() >= 4) {

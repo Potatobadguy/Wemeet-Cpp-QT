@@ -51,6 +51,10 @@ public:
     const Socket&   socket()   const { return sock_; }
     bool            connected() const { return connected_.load(std::memory_order_acquire); }
 
+    // ── 对端地址（accept 时保存，供媒体中继注册等使用）────
+    void        set_peer_ip(const std::string& ip) { peer_ip_ = ip; }
+    const std::string& peer_ip() const { return peer_ip_; }
+
     // 上下文数据（用户自定义，如 user_id）
     void set_context(std::any ctx) { context_ = std::move(ctx); }
     template<typename T> T* get_context() { return std::any_cast<T>(&context_); }
@@ -64,6 +68,7 @@ private:
     EventLoop*          loop_;
     Socket              sock_;
     uint64_t            conn_id_;
+    std::string         peer_ip_;   // 对端 IP（accept 时由 TcpServer 回填）
 
     // 读写缓冲区
     Buffer              read_buf_;

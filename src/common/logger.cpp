@@ -101,8 +101,19 @@ void Logger::log(LogLevel level, const char* file, int line,
     if (console_enabled_) {
         if (level >= LogLevel::ERROR) {
             std::cerr << line_buf;
+            std::cerr.flush();
         } else {
             std::cout << line_buf;
+            std::cout.flush();
+        }
+    }
+
+    // 立即写入文件（不用后台线程，避免缓冲问题）
+    if (file_stream_.is_open()) {
+        {
+            std::lock_guard<std::mutex> file_lock(file_mutex_);
+            file_stream_.write(line_buf, total);
+            file_stream_.flush();
         }
     }
 

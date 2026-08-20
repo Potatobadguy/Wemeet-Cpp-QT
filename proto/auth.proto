@@ -34,3 +34,15 @@ message LogoutReq {
     uint64 user_id = 1;
     string token   = 2;
 }
+
+// ── 免密码认证（Demo 用）────────────────────────────────
+message AuthByIdReq {
+    uint64 user_id   = 1;
+    string nickname  = 2;
+}
+
+message AuthByIdResp {
+    bool   success   = 1;
+    uint64 user_id   = 2;
+    string error_msg = 3;
+}

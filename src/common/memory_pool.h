@@ -73,8 +73,20 @@ private:
 
     // ── 线程局部池 ───────────────────────────────────────
     struct ThreadLocalPool {
-        // 每个 Tier 一个空闲链表
-        std::array<std::vector<void*>, static_cast<size_t>(Tier::COUNT)> free_lists;
+        /**
+         * 侵入式 freelist（#15）：
+         * 空闲块自身首部直接存放下一个空闲块的指针，不再使用
+         * std::vector<void*> 外置容器 —— 零额外堆分配、入/出链表 O(1)、
+         * 无 vector 扩容/收缩开销。块最小 8KB，足以容纳一个指针。
+         */
+        struct FreeNode {
+            FreeNode* next;
+        };
+
+        // 每个 Tier 一个侵入式空闲链表的表头 + 当前块数
+        std::array<FreeNode*, static_cast<size_t>(Tier::COUNT)> free_heads{};
+        std::array<size_t,    static_cast<size_t>(Tier::COUNT)> free_counts{};
+
         ~ThreadLocalPool();
 
         void* allocate(Tier tier, size_t block_size, std::atomic<uint64_t>& pool_hits);
