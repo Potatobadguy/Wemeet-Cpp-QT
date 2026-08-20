@@ -191,15 +191,18 @@ void MainWindow::setup_navigation() {
         "QPushButton:hover { background: #FF6B6B; color: white; }");
 
     nav_layout->addWidget(back_btn_);
+    nav_layout->addWidget(back_btn_);
     nav_layout->addWidget(user_label_);
     nav_layout->addStretch();
     nav_layout->addWidget(server_status_label_);
     nav_layout->addWidget(logout_btn_);
 
     nav_bar_->setStyleSheet("background: #ffffff; border-bottom: 1px solid #e8edf5;");
+    nav_bar_->setStyleSheet("background: #ffffff; border-bottom: 1px solid #e8edf5;");
     nav_bar_->setFixedHeight(48);
     nav_bar_->hide();
 
+    connect(back_btn_,   &QPushButton::clicked, this, &MainWindow::on_back_requested);
     connect(back_btn_,   &QPushButton::clicked, this, &MainWindow::on_back_requested);
     connect(logout_btn_, &QPushButton::clicked, this, &MainWindow::on_logout);
 }
@@ -668,6 +671,7 @@ void MainWindow::on_login_success(uint64_t user_id, const QString& nickname) {
     current_nickname_ = nickname;
     user_label_->setText(nickname);
     nav_bar_->show();
+    nav_history_.clear();
     nav_history_.clear();
     stack_->setCurrentIndex(PAGE_LOBBY);
     update_back_button();

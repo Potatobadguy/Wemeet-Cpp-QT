@@ -46,6 +46,7 @@ class MeetingRoom : public QWidget {
 public:
     explicit MeetingRoom(QWidget* parent = nullptr);
     ~MeetingRoom();
+    ~MeetingRoom();
 
     void set_room_info(const QString& room_id, const QString& title,
                        uint64_t local_user_id, const QString& nickname);
@@ -94,6 +95,7 @@ private slots:
     void on_video_toggled();
     void on_share_toggled();
     void on_hangup();
+    void on_back();
     void on_back();
     void on_send_chat();
 
